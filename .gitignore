@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+config.json
+.DS_Store
+.run/
+# local runtime state (db, repo clones) lives under ~/.babysit-agent by default
+data/

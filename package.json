@@ -1,0 +1,19 @@
+{
+  "name": "babysit-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PR babysitting agent: polls authored PRs, verdicts review feedback with the Claude Agent SDK, auto-fixes/replies/escalates, with a web dashboard.",
+  "workspaces": [
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace @babysit/server",
+    "dev:web": "npm run dev --workspace @babysit/web",
+    "build": "npm run build --workspace @babysit/server && npm run build --workspace @babysit/web",
+    "start": "npm run start --workspace @babysit/server"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

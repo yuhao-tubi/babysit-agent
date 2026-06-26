@@ -1,0 +1,20 @@
+{
+  "githubLogin": "yuhao-tubi",
+  "pollIntervalMs": 300000,
+  "port": 4317,
+  "dryRun": true,
+  "reposRoot": "~/.babysit-agent/repos",
+  "dbPath": "~/.babysit-agent/state.db",
+  "maxThreadAttempts": 2,
+  "botLogins": [
+    "Copilot",
+    "copilot-pull-request-reviewer",
+    "copilot-pull-request-reviewer[bot]",
+    "codex-connector",
+    "codex-connector[bot]",
+    "github-actions[bot]"
+  ],
+  "ignoreRepos": ["adRise/chatgpt-app"],
+  "model": "us.anthropic.claude-opus-4-8",
+  "comment": "Copy to config.json and edit. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action."
+}
