@@ -22,16 +22,28 @@ export function isOwnAuthor(login: string): boolean {
   return login.toLowerCase() === cfg.githubLogin.toLowerCase();
 }
 
-/**
- * Whether a repo is on the ignore list. An entry containing "/" matches
- * owner/repo exactly; a bare entry matches the repo name under any owner.
- */
-export function isIgnoredRepo(owner: string, repo: string): boolean {
-  const cfg = loadConfig();
+function repoMatches(owner: string, repo: string, entries: string[]): boolean {
   const full = `${owner}/${repo}`.toLowerCase();
   const name = repo.toLowerCase();
-  return cfg.ignoreRepos.some((e) => {
+  return entries.some((e) => {
     const entry = e.toLowerCase();
     return entry.includes("/") ? entry === full : entry === name;
   });
+}
+
+/**
+ * Whether a repo is skipped. A repo is skipped if it is on the ignore list, or
+ * if an allow-list is configured and the repo is not on it. List entries with
+ * "/" match owner/repo exactly; bare entries match the repo name (any owner).
+ */
+export function isIgnoredRepo(owner: string, repo: string): boolean {
+  const cfg = loadConfig();
+  if (cfg.allowRepos.length && !repoMatches(owner, repo, cfg.allowRepos)) return true;
+  return repoMatches(owner, repo, cfg.ignoreRepos);
+}
+
+/** Whether CI babysitting is enabled for this repo (decision Q24). */
+export function isCiEnabledRepo(owner: string, repo: string): boolean {
+  const cfg = loadConfig();
+  return repoMatches(owner, repo, cfg.ci.enabledRepos);
 }

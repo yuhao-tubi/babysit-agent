@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { CiClass } from "./types.js";
 
 const exec = promisify(execFile);
 
@@ -9,6 +10,14 @@ export interface GateResult {
   ran: boolean; // false => no applicable check found
   passed: boolean;
   detail: string;
+}
+
+/** Extra gate context for a CI fix (decision Q9/Q22). */
+export interface GateOpts {
+  /** Gate class of the failing CI check — selects which script(s) must pass. */
+  ciClass?: CiClass;
+  /** For unit-test fixes: the specific test the agent wants verified. */
+  testTarget?: { file: string; nameFilter?: string };
 }
 
 async function run(cmd: string, args: string[], cwd: string): Promise<{ ok: boolean; out: string }> {
@@ -34,24 +43,50 @@ function which(cmd: string): boolean {
  * Pre-push gate (plan decision #8). Detect and run the repo's check; if none
  * applies, return ran=false so the caller escalates ("can't self-verify").
  */
-export async function runGate(dir: string, repo: string): Promise<GateResult> {
-  // 1. JS/TS repos: prefer test, then lint, via package.json scripts.
+export async function runGate(dir: string, repo: string, opts: GateOpts = {}): Promise<GateResult> {
+  // 1. JS/TS repos: typecheck AND lint must both pass (conjunction), as the
+  //    floor. For a CI fix, the failing check's class adds the script that
+  //    genuinely verifies it (build / unit test) — decision Q9b/Q22.
   const pkgPath = join(dir, "package.json");
   if (existsSync(pkgPath)) {
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
     const scripts = pkg.scripts ?? {};
     const hasYarn = existsSync(join(dir, "yarn.lock"));
     const runner = hasYarn ? "yarn" : "npm";
-    for (const script of ["typecheck", "lint", "test"]) {
-      if (scripts[script]) {
-        const args = hasYarn ? [script] : ["run", script, "--if-present"];
-        const r = await run(runner, args, dir);
-        return {
-          ran: true,
-          passed: r.ok,
-          detail: `${runner} ${script}: ${r.ok ? "passed" : "FAILED"}\n${r.out}`,
-        };
+    const required = ["typecheck", "lint"].filter((s) => scripts[s]);
+
+    // build-class CI fix: the build script must also pass.
+    if (opts.ciClass === "build") {
+      const buildScript = ["build"].find((s) => scripts[s]);
+      if (!buildScript) {
+        return { ran: false, passed: false, detail: "build-class CI fix but no `build` script to self-verify" };
       }
+      if (!required.includes(buildScript)) required.push(buildScript);
+    }
+
+    if (required.length) {
+      const details: string[] = [];
+      for (const script of required) {
+        const args = hasYarn ? [script] : ["run", script];
+        const r = await run(runner, args, dir);
+        details.push(`${runner} ${script}: ${r.ok ? "passed" : "FAILED"}\n${r.out}`);
+        if (!r.ok) {
+          return { ran: true, passed: false, detail: details.join("\n---\n") };
+        }
+      }
+      // unit-test-class CI fix: run the failing test (or whole suite as fallback).
+      if (opts.ciClass === "unit_test") {
+        const testGate = await runUnitTests(dir, scripts, hasYarn, runner, opts.testTarget);
+        details.push(testGate.detail);
+        return { ran: testGate.ran, passed: testGate.ran && testGate.passed, detail: details.join("\n---\n") };
+      }
+      return { ran: true, passed: true, detail: details.join("\n---\n") };
+    }
+
+    // No typecheck/lint scripts, but a unit-test CI fix still needs the suite run.
+    if (opts.ciClass === "unit_test") {
+      const testGate = await runUnitTests(dir, scripts, hasYarn, runner, opts.testTarget);
+      return testGate;
     }
   }
 
@@ -79,6 +114,54 @@ export async function runGate(dir: string, repo: string): Promise<GateResult> {
   }
 
   return { ran: false, passed: false, detail: "no applicable check/validator found" };
+}
+
+/**
+ * Run the repo's unit tests for a unit-test CI fix (decision Q9b/Q9c). Prefers
+ * the agent-supplied target (fast); falls back to the whole suite when there's
+ * no target, the target matched nothing, or the targeted run errors out. A run
+ * that matched ZERO tests never counts as a pass. Returns ran=false when no test
+ * script is detectable (caller escalates).
+ */
+async function runUnitTests(
+  dir: string,
+  scripts: Record<string, string>,
+  hasYarn: boolean,
+  runner: string,
+  target?: { file: string; nameFilter?: string }
+): Promise<GateResult> {
+  const testScript = ["test:unit", "test"].find((s) => scripts[s]);
+  if (!testScript) {
+    return { ran: false, passed: false, detail: "unit-test CI fix but no test script detected" };
+  }
+  const base = hasYarn ? [testScript] : ["run", testScript];
+
+  // Targeted run first, if the agent gave us a target.
+  if (target?.file) {
+    const extra = ["--", target.file];
+    if (target.nameFilter) extra.push("-t", target.nameFilter);
+    const r = await run(runner, [...base, ...extra], dir);
+    const zero = /no tests found|0 (passed|total)|matched 0 tests/i.test(r.out);
+    if (zero) {
+      // Target matched nothing — a bad filter; fall back to the whole suite.
+    } else {
+      // Target ran for real: its pass/fail IS the verdict (don't mask a real
+      // failure by re-running the whole suite).
+      return {
+        ran: true,
+        passed: r.ok,
+        detail: `${runner} ${testScript} ${target.file}: ${r.ok ? "passed" : "FAILED"}\n${r.out}`,
+      };
+    }
+  }
+
+  const full = await run(runner, base, dir);
+  const zeroFull = /no tests found|matched 0 tests/i.test(full.out);
+  return {
+    ran: true,
+    passed: full.ok && !zeroFull,
+    detail: `${runner} ${testScript} (whole suite): ${full.ok && !zeroFull ? "passed" : "FAILED"}\n${full.out}`,
+  };
 }
 
 function hasKustomizations(dir: string): boolean {

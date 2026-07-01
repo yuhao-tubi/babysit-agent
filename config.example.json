@@ -4,8 +4,10 @@
   "port": 4317,
   "dryRun": true,
   "reposRoot": "~/.babysit-agent/repos",
+  "worktreesRoot": "~/.babysit-agent/worktrees",
   "dbPath": "~/.babysit-agent/state.db",
   "maxThreadAttempts": 2,
+  "maxGateFixAttempts": 2,
   "botLogins": [
     "Copilot",
     "copilot-pull-request-reviewer",
@@ -15,6 +17,25 @@
     "github-actions[bot]"
   ],
   "ignoreRepos": ["adRise/chatgpt-app"],
-  "model": "us.anthropic.claude-opus-4-8",
-  "comment": "Copy to config.json and edit. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action."
+  "allowRepos": ["adRise/www"],
+  "autoPushClasses": [],
+  "bedrockModelName": "claude-opus",
+  "ci": {
+    "enabledRepos": ["www"],
+    "checkAllowlist": [
+      { "pattern": "eslint", "class": "lint" },
+      { "pattern": "lint", "class": "lint" },
+      { "pattern": "typecheck", "class": "typecheck" },
+      { "pattern": "type-check", "class": "typecheck" },
+      { "pattern": "tsc", "class": "typecheck" },
+      { "pattern": "build", "class": "build" },
+      { "pattern": "unit", "class": "unit_test" },
+      { "pattern": "test", "class": "unit_test" }
+    ]
+  },
+  "overview": {
+    "enabled": true,
+    "maxTurns": 60
+  },
+  "comment": "Copy to config.json and edit. Bedrock auth uses KeySmith — set KEYSMITH_* in .env (see .env.example). bedrockModelName is the KeySmith friendly model name, resolved to an inference-profile ARN at runtime. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action. autoPushClasses lists author classes (\"ci\"/\"bot\"/\"human\") allowed to push without owner approval when the gate passes; default [] means every change parks at awaiting_approval for you to Approve (risk:high always parks regardless)."
 }

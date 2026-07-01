@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Thread Lifecycle — PR Babysitting Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#f5f8fc;
+    --bg-2:#eef3fa;
+    --panel:#ffffff;
+    --panel-2:#f0f5fb;
+    --grid:rgba(40,80,130,.07);
+    --grid-strong:rgba(40,80,130,.16);
+    --ink:#16273d;
+    --muted:#4a6076;
+    --faint:#7589a0;
+    --cyan:#0e8fb0;
+    --line:rgba(14,143,176,.55);
+
+    --pending:#c4810c;
+    --in_progress:#2c6fd6;
+    --awaiting:#7d52d6;
+    --resolved:#15966a;
+    --blocked:#d9583f;
+    --error:#c23150;
+    --human:#c4810c;
+
+    --maxw:1180px;
+    --radius:14px;
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1200px 700px at 78% -8%, rgba(44,111,214,.07), transparent 60%),
+      radial-gradient(900px 600px at 8% 110%, rgba(21,150,106,.05), transparent 55%),
+      var(--bg);
+    color:var(--ink);
+    font-family:"Inter",system-ui,sans-serif;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* faint engineering grid over everything */
+  body::before{
+    content:"";
+    position:fixed;
+    inset:0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size:34px 34px;
+    pointer-events:none;
+    z-index:0;
+  }
+
+  .wrap{position:relative;z-index:1;max-width:var(--maxw);margin:0 auto;padding:0 28px}
+
+  /* ---------- masthead ---------- */
+  header.sheet{
+    padding:64px 0 30px;
+    border-bottom:1px solid var(--grid-strong);
+  }
+  .eyebrow{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:var(--cyan);
+    display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  }
+  .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px rgba(14,143,176,.6)}
+  h1{
+    font-family:"Space Grotesk",sans-serif;
+    font-weight:700;
+    font-size:clamp(40px,7vw,76px);
+    line-height:.98;
+    letter-spacing:-.02em;
+    margin:18px 0 0;
+  }
+  h1 .sub{display:block;color:var(--muted);font-weight:500;font-size:clamp(18px,2.4vw,26px);letter-spacing:0;margin-top:14px;max-width:64ch}
+  .pipeline{
+    margin-top:26px;
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--muted);
+  }
+  .pipeline b{color:var(--ink);font-weight:600}
+  .pipeline .seg{padding:6px 12px;border:1px solid var(--grid-strong);border-radius:999px;background:var(--panel)}
+  .pipeline .arr{color:var(--cyan)}
+
+  /* ---------- section scaffolding ---------- */
+  section{padding:56px 0;border-bottom:1px solid var(--grid-strong)}
+  .kicker{
+    font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--faint);margin:0 0 8px;
+    display:flex;align-items:center;gap:10px;
+  }
+  .kicker .idx{color:var(--cyan)}
+  h2{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:clamp(26px,3.6vw,38px);letter-spacing:-.01em;margin:0 0 6px}
+  .lede{color:var(--muted);max-width:70ch;margin:0}
+
+  /* ---------- diagram ---------- */
+  .schematic{
+    margin-top:30px;
+    border:1px solid var(--grid-strong);
+    border-radius:var(--radius);
+    background:
+      linear-gradient(180deg, var(--panel), var(--panel-2));
+    padding:14px;
+    overflow:hidden;
+  }
+  .schematic svg{display:block;width:100%;height:auto}
+
+  .legend{
+    margin-top:18px;display:flex;gap:26px;flex-wrap:wrap;
+    font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--muted);
+  }
+  .legend .row{display:flex;align-items:center;gap:9px}
+  .legend .swatch{width:30px;height:0;border-top:3px solid var(--cyan)}
+  .legend .swatch.dash{border-top:3px dashed var(--human)}
+
+  /* svg text helpers via classes */
+  .n-label{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:15px;fill:var(--ink)}
+  .n-tag{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.06em;fill:var(--faint)}
+  .e-label{font-family:"IBM Plex Mono",monospace;font-size:11.5px;fill:var(--muted)}
+  .e-human{fill:var(--human)}
+  .title-s{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.18em;fill:var(--faint)}
+
+  /* ---------- state cards ---------- */
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin-top:30px}
+  .card{
+    border:1px solid var(--grid-strong);
+    border-left:4px solid var(--accent,var(--cyan));
+    border-radius:12px;
+    background:var(--panel);
+    box-shadow:0 1px 2px rgba(40,80,130,.05);
+    padding:20px 22px;
+  }
+  .card .state{
+    display:flex;align-items:baseline;gap:12px;margin-bottom:4px;
+  }
+  .card .badge{
+    font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:14px;
+    color:var(--accent,var(--cyan));
+  }
+  .card .meaning{color:var(--muted);font-size:14px;margin:0 0 16px}
+  .acts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:11px}
+  .acts li{display:grid;grid-template-columns:auto 1fr;gap:13px;align-items:start}
+  .btn{
+    font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-weight:500;
+    white-space:nowrap;padding:4px 10px;border-radius:7px;
+    border:1px solid var(--grid-strong);background:rgba(14,143,176,.07);
+    color:var(--ink);
+  }
+  .btn.primary{border-color:var(--resolved);color:var(--resolved);background:rgba(21,150,106,.09)}
+  .acts .desc{font-size:13.5px;color:var(--muted)}
+  .acts .desc b{color:var(--ink);font-weight:600}
+  .acts .to{
+    font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint);
+    display:block;margin-top:3px;
+  }
+  .acts .to em{font-style:normal;color:var(--cyan)}
+  .none{color:var(--faint);font-size:13.5px;font-style:italic}
+
+  /* ---------- actions reference table ---------- */
+  .ref{margin-top:28px;border:1px solid var(--grid-strong);border-radius:12px;overflow:hidden;background:var(--panel)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{
+    text-align:left;font-family:"IBM Plex Mono",monospace;font-weight:600;
+    font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+    padding:14px 18px;background:var(--panel-2);border-bottom:1px solid var(--grid-strong);
+  }
+  tbody td{padding:14px 18px;border-bottom:1px solid var(--grid);vertical-align:top;color:var(--muted)}
+  tbody tr:last-child td{border-bottom:none}
+  td .ctl{font-family:"IBM Plex Mono",monospace;color:var(--ink);font-weight:600;white-space:nowrap}
+  td code{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--cyan);background:rgba(14,143,176,.1);padding:2px 7px;border-radius:6px}
+  td b{color:var(--ink);font-weight:600}
+
+  .note{
+    margin-top:26px;display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:start;
+    border:1px solid rgba(196,129,12,.3);border-radius:12px;padding:18px 20px;
+    background:rgba(196,129,12,.08);
+  }
+  .note .mark{font-family:"IBM Plex Mono",monospace;color:var(--human);font-weight:600;font-size:12px;letter-spacing:.1em}
+  .note p{margin:0;color:var(--muted);font-size:13.5px}
+  .note b{color:var(--ink)}
+
+  footer{padding:40px 0 70px;color:var(--faint);font-family:"IBM Plex Mono",monospace;font-size:12px}
+  footer a{color:var(--cyan);text-decoration:none}
+
+  @media (max-width:760px){
+    .grid{grid-template-columns:1fr}
+    .ref{overflow-x:auto}
+    table{min-width:560px}
+  }
+  @media (prefers-reduced-motion:no-preference){
+    .node{transition:transform .18s ease}
+    .schematic:hover .node:hover{transform:translateY(-2px)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="sheet">
+    <div class="eyebrow"><span class="dot"></span> babysit-agent · schematic 01 · thread state machine</div>
+    <h1>Thread<br>Lifecycle
+      <span class="sub">A Thread is the unit of triage. It carries one Verdict, one gate run, and one attempt-loop guard — and it moves through six states. Here is the machine, and exactly where you can put your hands on it.</span>
+    </h1>
+    <div class="pipeline">
+      <span class="seg">Poll cycle</span><span class="arr">→</span>
+      <span class="seg"><b>verdict</b> · Agent SDK decides</span><span class="arr">→</span>
+      <span class="seg"><b>gate</b> · objective self-check</span><span class="arr">→</span>
+      <span class="seg"><b>executor</b> · push · reply · escalate</span>
+    </div>
+  </header>
+
+  <!-- ============ DIAGRAM ============ -->
+  <section id="machine">
+    <p class="kicker"><span class="idx">01</span> The machine</p>
+    <h2>States &amp; transitions</h2>
+    <p class="lede">Solid cyan lines are autonomous — the daemon walks them on its own each poll cycle. Dashed amber lines only move when <b style="color:var(--ink)">you</b> act from the dashboard. Two terminal states loop all the way back to <span style="color:var(--pending)">pending</span>: the lifecycle is idempotent and recomputed from live GitHub state, never from first sight.</p>
+
+    <div class="schematic">
+      <svg viewBox="0 0 1240 820" role="img" aria-label="Thread state machine diagram">
+        <defs>
+          <marker id="ar-cyan" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#0e8fb0"/>
+          </marker>
+          <marker id="ar-human" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#c4810c"/>
+          </marker>
+        </defs>
+
+        <!-- zone labels -->
+        <text class="title-s" x="40" y="40">ENTRY</text>
+        <text class="title-s" x="470" y="40">AUTONOMOUS PIPELINE</text>
+        <text class="title-s" x="820" y="40">TERMINAL STATES — NEEDS&#8209;YOU FLOATS UP</text>
+
+        <!-- ===== solid (autonomous) edges ===== -->
+        <!-- poll -> pending -->
+        <path d="M168,380 L233,380" stroke="#0e8fb0" stroke-width="2" fill="none" marker-end="url(#ar-cyan)"/>
+        <text class="e-label" x="200" y="370" text-anchor="middle">create</text>
+        <!-- pending -> in_progress -->
+        <path d="M387,380 L468,381" stroke="#0e8fb0" stroke-width="2" fill="none" marker-end="url(#ar-cyan)"/>
+        <text class="e-label" x="427" y="370" text-anchor="middle">recheck</text>
+        <text class="e-label" x="427" y="398" text-anchor="middle">→ verdict</text>
+
+        <!-- in_progress -> awaiting_approval -->
+        <path d="M662,352 C720,290 762,205 818,166" stroke="#0e8fb0" stroke-width="2" fill="none" marker-end="url(#ar-cyan)"/>
+        <text class="e-label" x="690" y="250" text-anchor="start">propose /</text>
+        <text class="e-label" x="690" y="268" text-anchor="start">amend_pr_body</text>
+        <text class="e-label" x="690" y="286" text-anchor="start">(gate ✓ · risk≠veto)</text>
+
+        <!-- in_progress -> resolved -->
+        <path d="M662,378 C715,360 762,348 818,341" stroke="#0e8fb0" stroke-width="2" fill="none" marker-end="url(#ar-cyan)"/>
+        <text class="e-label" x="690" y="333" text-anchor="start">reply · auto-push</text>
+        <text class="e-label" x="690" y="350" text-anchor="start">GH-resolved</text>
+
+        <!-- in_progress -> blocked -->
+        <path d="M662,412 C720,448 766,478 818,506" stroke="#0e8fb0" stroke-width="2" fill="none" marker-end="url(#ar-cyan)"/>
+        <text class="e-label" x="688" y="445" text-anchor="start">escalate · loop-guard</text>
+        <text class="e-label" x="688" y="462" text-anchor="start">manual_plan</text>
+
+        <!-- in_progress -> error -->
+        <path d="M655,427 C700,545 762,640 818,680" stroke="#0e8fb0" stroke-width="2" fill="none" marker-end="url(#ar-cyan)"/>
+        <text class="e-label" x="640" y="560" text-anchor="start">pipeline</text>
+        <text class="e-label" x="640" y="578" text-anchor="start">exception</text>
+
+        <!-- ===== dashed (operator) return edges ===== -->
+        <!-- awaiting_approval -> in_progress -->
+        <path d="M818,196 C690,250 620,300 590,333" stroke="#c4810c" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ar-human)"/>
+        <text class="e-label e-human" x="520" y="250" text-anchor="start">Approve /</text>
+        <text class="e-label e-human" x="520" y="268" text-anchor="start">Send instruction</text>
+
+        <!-- awaiting_approval self-loop: one part approved, other still pending -->
+        <path d="M905,120 C905,74 987,74 987,118" stroke="#c4810c" stroke-width="1.8" stroke-dasharray="6 5" fill="none" marker-end="url(#ar-human)"/>
+        <text class="e-label e-human" x="946" y="66" text-anchor="middle">Approve code · Post reply · Dismiss</text>
+        <text class="e-label e-human" x="946" y="52" text-anchor="middle">one part — other still pending</text>
+
+        <!-- blocked -> in_progress -->
+        <path d="M818,512 C720,500 670,470 650,429" stroke="#c4810c" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ar-human)"/>
+        <text class="e-label e-human" x="755" y="610" text-anchor="start">Send instruction</text>
+
+        <!-- error -> in_progress (Retry) -->
+        <path d="M818,668 C640,610 585,480 568,429" stroke="#c4810c" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ar-human)"/>
+        <text class="e-label e-human" x="455" y="470" text-anchor="start">Retry</text>
+
+        <!-- reopen rail: resolved -> pending -->
+        <path d="M945,381 C952,742 360,760 312,414" stroke="#c4810c" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ar-human)"/>
+        <!-- reopen rail: error -> pending -->
+        <path d="M945,721 C950,802 320,802 308,414" stroke="#c4810c" stroke-width="1.6" stroke-dasharray="4 5" fill="none" marker-end="url(#ar-human)" opacity="0.85"/>
+        <text class="e-label e-human" x="628" y="788" text-anchor="middle">Fresh Rerun · new (non-self) activity  →  reopens to pending</text>
+
+        <!-- ===== nodes ===== -->
+        <!-- poll (entry) -->
+        <g class="node">
+          <ellipse cx="96" cy="380" rx="72" ry="46" fill="rgba(14,143,176,.09)" stroke="#0e8fb0" stroke-width="1.6"/>
+          <text class="n-label" x="96" y="375" text-anchor="middle" style="font-size:13px">Poll cycle</text>
+          <text class="n-tag" x="96" y="393" text-anchor="middle">discovers feedback</text>
+        </g>
+
+        <!-- pending -->
+        <g class="node">
+          <rect x="233" y="348" width="154" height="64" rx="11" fill="rgba(196,129,12,.1)" stroke="#c4810c" stroke-width="1.8"/>
+          <text class="n-label" x="310" y="375" text-anchor="middle" style="fill:#c4810c">pending</text>
+          <text class="n-tag" x="310" y="393" text-anchor="middle">queued</text>
+        </g>
+
+        <!-- in_progress (hub) -->
+        <g class="node">
+          <rect x="468" y="335" width="194" height="92" rx="13" fill="rgba(44,111,214,.1)" stroke="#2c6fd6" stroke-width="2"/>
+          <text class="n-label" x="565" y="373" text-anchor="middle" style="fill:#2c6fd6;font-size:16px">in_progress</text>
+          <text class="n-tag" x="565" y="393" text-anchor="middle">verdict · gate · execute</text>
+          <text class="n-tag" x="565" y="408" text-anchor="middle" style="fill:#2c6fd6;opacity:.75">— the hub —</text>
+        </g>
+
+        <!-- awaiting_approval -->
+        <g class="node">
+          <rect x="818" y="120" width="256" height="78" rx="12" fill="rgba(125,82,214,.1)" stroke="#7d52d6" stroke-width="1.8"/>
+          <text class="n-label" x="946" y="153" text-anchor="middle" style="fill:#7d52d6">awaiting_approval</text>
+          <text class="n-tag" x="946" y="173" text-anchor="middle">frozen Proposal parked</text>
+          <text class="n-tag" x="946" y="188" text-anchor="middle">change + reply · approved separately</text>
+        </g>
+
+        <!-- resolved -->
+        <g class="node">
+          <rect x="818" y="300" width="256" height="78" rx="12" fill="rgba(21,150,106,.1)" stroke="#15966a" stroke-width="1.8"/>
+          <text class="n-label" x="946" y="333" text-anchor="middle" style="fill:#15966a">resolved</text>
+          <text class="n-tag" x="946" y="353" text-anchor="middle">replied · pushed · dropped</text>
+          <text class="n-tag" x="946" y="368" text-anchor="middle">GitHub thread closed</text>
+        </g>
+
+        <!-- blocked -->
+        <g class="node">
+          <rect x="818" y="470" width="256" height="78" rx="12" fill="rgba(217,88,63,.1)" stroke="#d9583f" stroke-width="1.8"/>
+          <text class="n-label" x="946" y="503" text-anchor="middle" style="fill:#d9583f">blocked</text>
+          <text class="n-tag" x="946" y="523" text-anchor="middle">decision needed · notified</text>
+          <text class="n-tag" x="946" y="538" text-anchor="middle">waits for Instruction</text>
+        </g>
+
+        <!-- error -->
+        <g class="node">
+          <rect x="818" y="640" width="256" height="78" rx="12" fill="rgba(194,49,80,.1)" stroke="#c23150" stroke-width="1.8"/>
+          <text class="n-label" x="946" y="673" text-anchor="middle" style="fill:#c23150">error</text>
+          <text class="n-tag" x="946" y="693" text-anchor="middle">recorded · recoverable</text>
+          <text class="n-tag" x="946" y="708" text-anchor="middle">daemon never crashes</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="legend">
+      <span class="row"><span class="swatch"></span> autonomous — daemon walks it each poll</span>
+      <span class="row"><span class="swatch dash"></span> operator — moves only when you act</span>
+    </div>
+  </section>
+
+  <!-- ============ OPERATOR CONTROLS ============ -->
+  <section id="controls">
+    <p class="kicker"><span class="idx">02</span> Where you put your hands on it</p>
+    <h2>Operator controls, by state</h2>
+    <p class="lede">Every Thread shows <b style="color:var(--ink)">Mark resolved</b> and <b style="color:var(--ink)">Reply on GitHub</b>. The state-specific moves are below. <b style="color:var(--ink)">Approve is the sole push path</b> — nothing else writes code to a PR branch (except author classes opted into <code style="font-family:'IBM Plex Mono'">autoPushClasses</code>).</p>
+
+    <div class="grid">
+
+      <!-- awaiting_approval -->
+      <article class="card" style="--accent:var(--awaiting)">
+        <div class="state"><span class="badge">awaiting_approval</span></div>
+        <p class="meaning">A frozen Proposal is parked. It carries up to <b style="color:var(--ink)">two independently-approvable parts</b> — the <b style="color:var(--ink)">change</b> (gate-passed code diff or PR-description rewrite) and the <b style="color:var(--ink)">reply</b>. Each is approved on its own; the Thread resolves only once both are settled.</p>
+        <ul class="acts">
+          <li>
+            <span class="btn primary">Approve &amp; push code</span>
+            <span class="desc"><b>The sole push path — change part only.</b> Re-checks the frozen diff against current HEAD, re-runs the gate, then fast-forward pushes — or for a description Proposal, runs <code style="font-family:'IBM Plex Mono';font-size:11px">gh pr edit</code>. Posts <b>no</b> reply.<span class="to">→ <em>resolved</em> if no reply pending, else stays <em>awaiting_approval</em></span></span>
+          </li>
+          <li>
+            <span class="btn primary">Post reply</span>
+            <span class="desc">Posts the drafted reply verbatim to the GitHub thread — <b>independent of the change</b>. Post it without the code, or push the code without it.<span class="to">→ <em>resolved</em> if change settled, else stays <em>awaiting_approval</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Dismiss</span>
+            <span class="desc">Drop the drafted reply without posting (you'll reply by hand, or none is needed). Settles the reply part.<span class="to">→ <em>resolved</em> if change settled, else stays <em>awaiting_approval</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Send to agent</span>
+            <span class="desc">A freeform Instruction always <b>re-proposes</b> a fresh diff to review. It never pushes.<span class="to">→ <em>in_progress → awaiting_approval</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Reply on GitHub</span>
+            <span class="desc">Post text verbatim to the thread, no agent.<span class="to">→ <em>resolved</em></span></span>
+          </li>
+        </ul>
+      </article>
+
+      <!-- blocked -->
+      <article class="card" style="--accent:var(--blocked)">
+        <div class="state"><span class="badge">blocked</span></div>
+        <p class="meaning">A decision is needed (escalation, loop-guard trip, or a too-large change parked as a Manual plan). It fired a notification and waits for you.</p>
+        <ul class="acts">
+          <li>
+            <span class="btn">Send to agent</span>
+            <span class="desc">Your Instruction re-proposes. Escalation <b>Options</b> are one-click chips that pre-fill this box — selecting one doesn't run the agent by itself.<span class="to">→ <em>in_progress → awaiting_approval</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Copy plan</span>
+            <span class="desc">For a <b>Manual plan</b>: copy the self-contained brief and run it in Claude Code on the branch yourself. The daemon never pushes it.<span class="to">→ stays <em>blocked</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Reply / Mark resolved</span>
+            <span class="desc">Answer verbatim, or close it out by hand.<span class="to">→ <em>resolved</em></span></span>
+          </li>
+        </ul>
+      </article>
+
+      <!-- error -->
+      <article class="card" style="--accent:var(--error)">
+        <div class="state"><span class="badge">error</span></div>
+        <p class="meaning">A transient failure was recorded — the daemon stays up. Recover from the most durable artifact.</p>
+        <ul class="acts">
+          <li>
+            <span class="btn">Retry</span>
+            <span class="desc">Resume from the last state. If a frozen Proposal exists it re-applies it (apply-check + re-gate); otherwise it falls back to a fresh rerun. Never replays a stored Verdict decision.<span class="to">→ <em>in_progress</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Fresh Rerun</span>
+            <span class="desc">Reset and re-run the whole Verdict pipeline from scratch.<span class="to">→ <em>pending</em></span></span>
+          </li>
+        </ul>
+      </article>
+
+      <!-- resolved -->
+      <article class="card" style="--accent:var(--resolved)">
+        <div class="state"><span class="badge">resolved</span></div>
+        <p class="meaning">Done. But not frozen — new feedback can legitimately re-open it.</p>
+        <ul class="acts">
+          <li>
+            <span class="btn">Fresh Rerun</span>
+            <span class="desc">Manually reopen and re-decide.<span class="to">→ <em>pending</em></span></span>
+          </li>
+          <li>
+            <span class="btn">↻ auto-reopen</span>
+            <span class="desc">New <b>non-self</b> activity reopens it next poll. Activity by <code style="font-family:'IBM Plex Mono';font-size:11px">@me</code> — including the agent's own acks — never counts.<span class="to">→ <em>pending</em></span></span>
+          </li>
+        </ul>
+      </article>
+
+      <!-- pending / in_progress -->
+      <article class="card" style="--accent:var(--in_progress);grid-column:1 / -1">
+        <div class="state"><span class="badge" style="color:var(--pending)">pending</span><span class="badge">in_progress</span></div>
+        <p class="meaning">Transient, daemon-owned states. The pipeline drives them — you rarely intervene, but you still can.</p>
+        <ul class="acts" style="display:grid;grid-template-columns:1fr 1fr;gap:14px 32px">
+          <li>
+            <span class="btn">Mark resolved</span>
+            <span class="desc">Abandon triage at any point; resolves the GitHub thread if inline.<span class="to">→ <em>resolved</em></span></span>
+          </li>
+          <li>
+            <span class="btn">Reply on GitHub</span>
+            <span class="desc">Step in with a direct human reply.<span class="to">→ <em>resolved</em></span></span>
+          </li>
+        </ul>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ============ ACTIONS REFERENCE ============ -->
+  <section id="reference">
+    <p class="kicker"><span class="idx">03</span> Control reference</p>
+    <h2>Every button, one row each</h2>
+    <p class="lede">Each dashboard control, the endpoint it calls, and exactly what it does to the Thread. A <b style="color:var(--ink)">→ resolved / awaiting_approval</b> result means it settles one part of a two-part Proposal: resolved once the other part is also done, else it stays parked for the remaining part. All GitHub writes honor <code>dryRun</code> (default <b style="color:var(--ink)">true</b>).</p>
+
+    <div class="ref">
+      <table>
+        <thead>
+          <tr><th>Control</th><th>Endpoint</th><th>What it does</th><th>Result</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="ctl">Approve &amp; push code</span></td>
+            <td><code>POST /approve</code></td>
+            <td>The <b>sole push path — change part only</b>. Re-applies the frozen change: apply-check + re-gate + ff-push for code; <code>gh pr edit</code> for a description. Posts <b>no</b> reply.</td>
+            <td>→ <b>resolved</b> / <b>awaiting_approval</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Post reply</span></td>
+            <td><code>POST /approve-reply</code></td>
+            <td>Posts the Proposal's drafted <b>reply part</b> verbatim to the GitHub thread — independent of the change. No agent, no push.</td>
+            <td>→ <b>resolved</b> / <b>awaiting_approval</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Dismiss</span></td>
+            <td><code>POST /dismiss-reply</code></td>
+            <td>Settles the Proposal's <b>reply part</b> without posting it (owner replies by hand, or none needed). No push.</td>
+            <td>→ <b>resolved</b> / <b>awaiting_approval</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Send to agent</span></td>
+            <td><code>POST /instruct</code></td>
+            <td>Freeform Instruction always <b>re-proposes</b>. Prefix <code>reply:</code> to park that text as a <b>reply Proposal</b> to review &amp; Post (never posted directly); <code>ignore</code> to drop. Never pushes.</td>
+            <td>→ <b>awaiting_approval</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Reply on GitHub</span></td>
+            <td><code>POST /reply</code></td>
+            <td>Posts the text verbatim to the GitHub thread (no agent, no verdict), then closes the Thread.</td>
+            <td>→ <b>resolved</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Mark resolved</span></td>
+            <td><code>POST /resolve</code></td>
+            <td>Marks the Thread resolved; resolves the underlying GitHub thread too if it's an inline comment.</td>
+            <td>→ <b>resolved</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Retry</span></td>
+            <td><code>POST /retry</code></td>
+            <td>Recover after a transient failure from the durable artifact: re-apply a frozen Proposal, else fall back to a fresh rerun.</td>
+            <td>→ <b>in_progress</b></td>
+          </tr>
+          <tr>
+            <td><span class="ctl">Fresh Rerun</span></td>
+            <td><code>POST /rerun</code></td>
+            <td>Reset to pending and re-run the entire Verdict pipeline from scratch.</td>
+            <td>→ <b>pending</b></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <span class="mark">GUARDRAIL</span>
+      <p><b>Approve is load-bearing.</b> A code change is always a Proposal — built, gate-verified, parked — and pushes only on your Approve, re-checked against current HEAD first. A Proposal's <b>reply is a separate part</b>: Approving the change pushes but posts no reply, and Posting the reply doesn't push — the Thread resolves only once both are settled. <code style="font-family:'IBM Plex Mono';font-size:11px">risk:"high"</code> keeps the Proposal but vetoes any auto-push. <code style="font-family:'IBM Plex Mono';font-size:11px">amend_pr_body</code> and Manual plans are <b>never</b> auto-applied. A <code style="font-family:'IBM Plex Mono';font-size:11px">reply:</code> Instruction parks its text as a reply Proposal (verbatim, no agent) to review and Post — it never posts directly. Restart recovery re-renders durable artifacts; it never replays a stored Verdict decision.</p>
+    </div>
+  </section>
+
+  <footer class="wrap">
+    babysit-agent · thread state machine · derived from <a href="../CONTEXT.md">CONTEXT.md</a>, <a href="../packages/server/src/processor.ts">processor.ts</a>, <a href="../packages/server/src/types.ts">types.ts</a>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -12,18 +12,30 @@ Ubiquitous language for this project. Glossary only — no implementation detail
 
 - **Author class** — `bot` or `human`, determined deterministically from the GitHub user type and a configurable login list, fixed to the Thread's **root** comment author. Drives the reply policy.
 
-- **Verdict** — the agent's categorical decision for a Thread: `auto_fix`, `reply`, or `escalate`. There is no numeric confidence; routing is the verdict plus the objective gate result.
+- **Verdict** — the agent's categorical decision for a Thread: `propose`, `reply`, `escalate`, or `amend_pr_body`. There is no numeric confidence; routing is the verdict plus the objective gate result. `propose` (a code change), `amend_pr_body` (a description change), and `reply` (a comment to post) all yield a **Proposal**; `escalate` means a decision is needed and carries no diff (it may list **options**). No GitHub write — push *or* reply — happens without an explicit **Approve** (except `autoPushClasses`).
 
-- **Pre-push gate** — the objective self-verification a fix must pass before any push: the repo's build/test, or a repo-type validator when there is no test suite.
+- **Proposal** — a frozen, owner-reviewable artifact parked on an Awaiting-approval Thread. It can carry up to two **independently-approvable parts**: a **change** (a gate-passed code diff built against a recorded `baseSha`, or a rewritten PR description) and a **reply** (a drafted comment to post). The owner approves them separately — pushing the code does not post the reply, and vice versa; either part can be approved, and the reply can be copied-out to refine by hand or dismissed. A `reply`-kind Proposal carries only the reply part. It is the durable truth for the Awaiting-approval state — restart recovery re-renders it and never re-runs the verdict. **Approve** acts on exactly these bytes. The Thread resolves only once the change is applied (or absent) **and** the reply is posted or dismissed. A further kind, **Manual plan**, is not approvable.
 
-- **Escalation** — a Thread that needs your judgment. It is marked **blocked**, fires a notification (coalesced per PR — one banner deep-linking to the PR, reflecting how many Threads need you), and waits for your Instruction.
+- **Manual plan** — the fallback when a `propose` change is too large to apply within the fix agent's turn budget (the agent hits its max-turns cap). Instead of erroring the Thread, a read-only planning pass runs in the same worktree and emits a self-contained implementation brief; it is parked as a `manual_plan` Proposal and the Thread is marked **blocked**. The daemon **never pushes** a manual plan — the owner copies the brief from the dashboard and runs it in Claude Code on the PR branch by hand. Like any Proposal it survives restarts; **Approve** is a no-op for it.
 
-- **Instruction** — your freeform input on a blocked Thread from the dashboard. The executor re-runs and acts on it (make a fix, post a specific reply, or ignore).
+- **Approve** — the owner's one-click acceptance of a Proposal part, and the **sole write path**. Approving the **change**: for a code Proposal, re-check the frozen diff still applies to the current HEAD, re-run the gate, then fast-forward push the exact reviewed bytes; for a description Proposal, `gh pr edit --body`. Approving the **reply** posts the drafted comment. The two are approved independently and neither implies the other. Nothing else pushes or comments on a PR (except the verbatim **Reply on GitHub** escape hatch, and classes opted into `autoPushClasses`, which auto-push and self-ack).
 
-- **Thread attempt** — the count of autonomous fixes already pushed for a Thread. Bounds the fix↔re-review loop: after the configured maximum, the next round escalates instead of fixing.
+- **Options** — for an `escalate` Verdict, the concrete choices the agent sees. In the dashboard they are clickable chips that pre-fill the Instruction box; selecting one does not run the agent by itself.
+
+- **Pre-push gate** — the objective self-verification a change must pass: the repo's build/test, or a repo-type validator when there is no test suite. Run when a Proposal is built, and again at Approve time against the current HEAD.
+
+- **Escalation** — a Thread that needs your judgment (a decision, not a change). It is marked **blocked**, fires a notification (coalesced per PR), and waits for your Instruction.
+
+- **Instruction** — your freeform input on a blocked / awaiting-approval Thread from the dashboard. A freeform Instruction always **re-proposes** (builds a fresh Proposal to review — it never pushes); `reply:` parks that text as a **reply Proposal** you review and post (it does not post directly — that is the verbatim **Reply on GitHub** button's job); `ignore` drops it. The box has an **AI refine** helper — a one-shot direct Claude rewrite of the box text (apply a note like "make it firmer"), not an agent run; the refined text returns to the box for you to edit and submit.
+
+- **Thread attempt** — the count of autonomous (auto-pushed) fixes already pushed for a Thread. Bounds the fix↔re-review loop for `autoPushClasses`: after the configured maximum, the next round escalates instead of fixing. Owner-approved pushes are the owner's call and aren't loop-limited.
+
+- **Auto-push classes** — `autoPushClasses` config: author classes (`ci`/`bot`/`human`) allowed to push without owner approval when the gate passes. Default `[]` — everything parks for Approve. `risk:"high"` always vetoes auto-push regardless.
 
 ## Status lifecycle
 
-`pending` → `in_progress` → (`resolved` | `blocked` | `error`)
+`pending` → `in_progress` → (`resolved` | `blocked` | `awaiting_approval` | `error`)
 
-A **blocked** Thread waits for an Instruction and survives daemon restarts. New activity on a `resolved` or `error` Thread re-opens it to `pending` (subject to the thread-attempt loop guard, which escalates to `blocked` once the max is reached). New activity on a `blocked`/`pending`/`in_progress` Thread just attaches the new items — it doesn't reset state. A Thread GitHub-marked resolved is moved to `resolved` and skipped.
+A **blocked** Thread (a decision is needed) waits for an Instruction. An **awaiting_approval** Thread holds a frozen Proposal and waits for Approve (or a revising Instruction); both survive daemon restarts. New activity on a `resolved` or `error` Thread re-opens it to `pending` for a **fresh** Verdict (subject to the thread-attempt loop guard) — but activity authored by you (`@me`), including the agent's own ack replies, never counts as new activity. New activity on a `blocked`/`awaiting_approval`/`pending`/`in_progress` Thread just attaches the new items — it doesn't reset state. A Thread GitHub-marked resolved is moved to `resolved` (dropping any Proposal) and skipped.
+
+Restart recovery is keyed on the most durable artifact, never on replaying a stored Verdict decision: an interrupted Approve re-applies the frozen Proposal; an interrupted Instruction re-proposes; a Thread with a frozen Proposal re-applies it; otherwise the Verdict pipeline re-runs from `pending`. An `awaiting_approval` Thread is left untouched — its Proposal is the durable truth.

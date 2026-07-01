@@ -1,0 +1,2 @@
+- [CI Feedback Design](ci-feedback-design.md) — agreed (not yet built) plan to treat CI check failures as a new `ci` author class of feedback
+- [Prefers Light Theme](prefers-light-theme.md) — default to light theme for generated HTML/UI/diagrams unless asked otherwise

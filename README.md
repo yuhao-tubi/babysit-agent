@@ -24,7 +24,14 @@ Runtime state lives under `~/.babysit-agent/` (SQLite `state.db` + repo clones).
 ```bash
 npm install
 cp config.example.json config.json   # edit; dryRun defaults to true
+cp .env.example .env                  # add your KeySmith key (see below)
 ```
+
+Bedrock access uses **KeySmith** ([docs](https://keysmith.int.tubi.io/docs)), not
+an AWS profile. Create an API key on the *My Keys* page (the secret is shown only
+once) and put `KEYSMITH_URL` / `KEYSMITH_KEY_ID` / `KEYSMITH_SECRET` in `.env`.
+The daemon mints short-lived Bedrock bearer tokens on demand and resolves
+`bedrockModelName` to the inference-profile ARN your key is allowed to invoke.
 
 `config.json` keys:
 
@@ -39,7 +46,7 @@ cp config.example.json config.json   # edit; dryRun defaults to true
 | `maxThreadAttempts` | auto-fixes per thread before escalating (loop guard) |
 | `botLogins` | extra bot logins beyond `user.type=="Bot"` and `*[bot]` |
 | `ignoreRepos` | repos to skip; `owner/repo` matches exactly, a bare name matches any owner |
-| `model` | Agent SDK model id (Bedrock: `us.anthropic.claude-opus-4-8`) |
+| `bedrockModelName` | KeySmith friendly model name, resolved to a Bedrock inference-profile ARN (e.g. `claude-opus`) |
 
 Uses your existing authenticated `gh` CLI — no in-app GitHub token.
 

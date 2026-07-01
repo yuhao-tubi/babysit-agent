@@ -13,3 +13,11 @@ export class SerialQueue {
     return next;
   }
 }
+
+/**
+ * The process-wide per-repo work queue. Thread processing AND PR-overview
+ * generation share this ONE instance so their git-worktree operations on the
+ * same repo never collide (decision 8) — a diagram request queues behind any
+ * in-flight Thread work for that repo, and vice versa.
+ */
+export const repoQueue = new SerialQueue();
