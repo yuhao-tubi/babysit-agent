@@ -463,6 +463,7 @@ export interface PrOverview {
   title: string;
   url: string;
   headRef: string;
+  role: PrRole;
   /** Current head sha from the last poll (staleness = differs from overviewHeadSha). */
   headSha: string | null;
   /** The 4-part overview markdown, or null if never generated. */
@@ -484,6 +485,7 @@ function rowToOverview(r: any): PrOverview {
     title: r.title,
     url: r.url,
     headRef: r.head_ref,
+    role: (r.role as PrRole) ?? "author",
     headSha: r.head_sha ?? null,
     overviewMd: r.overview_md ?? null,
     diagramPath: r.diagram_path ?? null,

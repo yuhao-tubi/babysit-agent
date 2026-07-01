@@ -13,7 +13,7 @@ import {
   lastPollTime,
   getPrOverview,
 } from "./db.js";
-import { requestOverview } from "./overview.js";
+import { requestOverview, requestQuestion } from "./overview.js";
 import {
   applyInstruction,
   approveThread,
@@ -120,6 +120,9 @@ export async function startServer(port: number): Promise<void> {
       !!pr.overviewHeadSha && !!pr.headSha && pr.overviewHeadSha !== pr.headSha;
     return {
       prKey: pr.prKey,
+      title: pr.title,
+      url: pr.url,
+      role: pr.role,
       status: pr.overviewStatus,
       overviewMd: pr.overviewMd,
       hasDiagram: !!pr.diagramPath,
@@ -137,6 +140,20 @@ export async function startServer(port: number): Promise<void> {
     if (!r.ok) return reply.code(409).send({ error: r.reason });
     return { ok: true };
   });
+
+  // Ask a grounded question about the PR; the answer is appended to the
+  // overview markdown. Fire-and-forget; the appended Q&A arrives via SSE.
+  app.post<{ Params: { key: string }; Body: { question: string } }>(
+    "/api/prs/:key/question",
+    async (req, reply) => {
+      const prKey = decodeURIComponent(req.params.key);
+      const question = req.body?.question;
+      if (!question?.trim()) return reply.code(400).send({ error: "question required" });
+      const r = requestQuestion(prKey, question);
+      if (!r.ok) return reply.code(409).send({ error: r.reason });
+      return { ok: true };
+    }
+  );
 
   // Stream the generated SVG diagram from the DB-recorded path (never a static
   // mount over the state dir — the path is resolved only from the row).

@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Space, Spin, Typography } from "antd";
-import { FileTextOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Alert, Button, Input, Space, Spin, Tag, Typography, message } from "antd";
+import {
+  FileTextOutlined,
+  GithubOutlined,
+  ReloadOutlined,
+  QuestionCircleOutlined,
+  SendOutlined,
+} from "@ant-design/icons";
 import type { PrOverview } from "./types";
-import { fetchPrOverview, generatePrOverview, prDiagramUrl } from "./api";
+import { askPrQuestion, fetchPrOverview, generatePrOverview, prDiagramUrl } from "./api";
 import { Markdown } from "./Markdown";
 
-const { Text } = Typography;
+const { Title, Text } = Typography;
 
 /**
  * PR-level Overview + diagram panel (a Session artifact — see CONTEXT.md).
@@ -47,6 +53,26 @@ export function OverviewPanel({
 
   return (
     <div style={{ padding: "4px 2px 8px" }}>
+      {/* PR header — title, key, role, GitHub link. */}
+      <div style={{ marginBottom: 12 }}>
+        <Space size={8} align="center" wrap>
+          <Text strong style={{ fontSize: 15 }}>
+            {ov?.prKey ?? prKey}
+          </Text>
+          {ov && (
+            <a href={ov.url} target="_blank" rel="noreferrer" title="Open PR on GitHub">
+              <GithubOutlined />
+            </a>
+          )}
+          {ov?.role === "reviewer" && <Tag color="purple">REVIEW</Tag>}
+        </Space>
+        {ov?.title && (
+          <Title level={5} style={{ margin: "4px 0 0", fontWeight: 500 }}>
+            {ov.title}
+          </Title>
+        )}
+      </div>
+
       <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
           <FileTextOutlined /> PR overview &amp; diagram
@@ -100,15 +126,14 @@ export function OverviewPanel({
 
       {ov?.overviewMd && (
         <>
-          <Markdown maxHeight={360}>{ov.overviewMd}</Markdown>
           {ov.hasDiagram && (
             <div
               style={{
-                marginTop: 10,
+                marginBottom: 12,
                 border: "1px solid #f0f0f0",
                 borderRadius: 8,
                 overflow: "auto",
-                background: "#020617",
+                background: "#ffffff",
               }}
             >
               {/* Cache-bust by generatedAt so a regenerate reloads the SVG. */}
@@ -120,7 +145,78 @@ export function OverviewPanel({
               />
             </div>
           )}
+          <Markdown>{ov.overviewMd}</Markdown>
+
+          {/* Ask a grounded question — the agent investigates the checkout and
+              appends the Q&A to the overview above. */}
+          <QuestionBox prKey={prKey} busy={!!generating} onAsked={load} />
         </>
+      )}
+    </div>
+  );
+}
+
+function QuestionBox({
+  prKey,
+  busy,
+  onAsked,
+}: {
+  prKey: string;
+  busy: boolean;
+  onAsked: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const ask = async () => {
+    const text = q.trim();
+    if (!text) return;
+    setSubmitting(true);
+    try {
+      await askPrQuestion(prKey, text);
+      setQ("");
+      onAsked();
+    } catch (e: any) {
+      message.error(e?.message ?? "Question failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 16, borderTop: "1px solid #f0f0f0", paddingTop: 12, paddingBottom: 24 }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        <QuestionCircleOutlined /> Ask about this PR — the agent investigates the code and
+        appends the answer above.
+      </Text>
+      <Space.Compact style={{ width: "100%", marginTop: 6 }}>
+        <Input.TextArea
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="e.g. Does this handle the empty-contentIds case on mount?"
+          autoSize={{ minRows: 1, maxRows: 4 }}
+          disabled={busy || submitting}
+          onPressEnter={(e) => {
+            if (!e.shiftKey) {
+              e.preventDefault();
+              void ask();
+            }
+          }}
+        />
+        <Button
+          type="primary"
+          icon={<SendOutlined />}
+          loading={submitting || busy}
+          disabled={!q.trim()}
+          onClick={ask}
+        >
+          Ask
+        </Button>
+      </Space.Compact>
+      {busy && (
+        <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+          Investigating…
+        </Text>
       )}
     </div>
   );

@@ -65,8 +65,8 @@ DIAGRAM SCOPING DISCIPLINE (avoid the "every changed file is a box" sprawl):
 
 SVG REQUIREMENTS:
 - A single self-contained <svg> element with an xmlns attribute and a viewBox. No external <script>, no external stylesheet, no <image href> to remote URLs.
-- Dark theme: background rect fill #020617, node fills around #0f172a with #1e293b strokes, text #e2e8f0, accent edges #38bdf8. Monospace font-family (e.g. "JetBrains Mono", ui-monospace, monospace) — do NOT reference remote fonts.
-- Legible: readable font-size (>= 13), arrows on edges, no overlapping text.
+- LIGHT theme: background rect fill #ffffff, node fills #f8fafc with #cbd5e1 strokes, node title text #0f172a, secondary text #475569, accent edges/arrows #2563eb with edge labels #64748b. Callout boxes: success #16a34a on #f0fdf4, warning #d97706 on #fffbeb. Monospace font-family (e.g. "JetBrains Mono", ui-monospace, monospace) — do NOT reference remote fonts.
+- Legible: readable font-size (>= 13), arrows on edges, no overlapping text, sufficient contrast on the white background.
 
 If you genuinely cannot produce a meaningful diagram (e.g. a pure config/text change), still emit a valid minimal <svg> that states that in a single labeled box — never emit malformed XML.`;
 
@@ -208,8 +208,137 @@ export async function generateOverview(prKey: string): Promise<OverviewResult> {
   }
 }
 
-/** PRs with a generation currently running — the in-flight double-click guard. */
+const QA_SYSTEM = `You answer a specific QUESTION about a pull request. You work in a read-only checkout of the PR branch. Investigate the ACTUAL code before answering — never guess.
+
+You are given the PR's existing overview (for context on what the change does) and a question from the PR reviewer. GREP/GLOB/READ the checkout and the diff (\`git diff origin/master...HEAD\`) to ground your answer in real code. Cite specific files and, where useful, function/symbol names.
+
+Answer concisely in GitHub-flavored Markdown — a few sentences or tight bullets, not an essay. If the question cannot be answered from the code (e.g. it asks about intent not visible in the diff), say so plainly rather than speculating.
+
+Return ONLY the answer markdown — no preamble like "Here is the answer", no fenced code block wrapping the whole thing (inline code and code blocks WITHIN the answer are fine).`;
+
+function buildQaPrompt(pr: PrOverview, question: string): string {
+  return [
+    `PR: ${pr.prKey}`,
+    `Title: ${pr.title}`,
+    "",
+    "Existing overview (context — do not repeat it, build on it):",
+    "<<<OVERVIEW",
+    pr.overviewMd || "(none)",
+    "OVERVIEW",
+    "",
+    "Reviewer's question:",
+    "<<<QUESTION",
+    question,
+    "QUESTION",
+    "",
+    "Investigate the checkout, then return only your answer as Markdown.",
+  ].join("\n");
+}
+
+export interface AnswerResult {
+  answerMd: string;
+  status: "ready" | "failed";
+}
+
+/**
+ * Answer a reviewer's question about a PR by a read-only investigation of the
+ * checkout, then APPEND the Q&A to the PR's overview markdown (so it becomes
+ * part of the durable overview and renders inline). Performs NO GitHub writes.
+ * A Regenerate wipes appended Q&A — that is the intended "start over" semantic.
+ */
+export async function answerQuestion(prKey: string, question: string): Promise<AnswerResult> {
+  const pr = getPrOverview(prKey);
+  if (!pr) throw new Error(`no PR ${prKey}`);
+  const cfg = loadConfig();
+
+  const head = await getPrHead(pr.owner, pr.repo, pr.number);
+  const wtKey = -pr.number;
+  const { dir } = await addWorktree(pr.owner, pr.repo, head.headRefName, wtKey, {
+    skipDeps: true,
+  });
+  try {
+    let assistantText = "";
+    let last = "";
+    let endSubtype = "";
+    const { env, modelArn } = await sdkEnv();
+    for await (const msg of query({
+      prompt: buildQaPrompt(pr, question),
+      options: {
+        cwd: dir,
+        model: modelArn,
+        systemPrompt: QA_SYSTEM,
+        permissionMode: "dontAsk",
+        allowedTools: ["Read", "Grep", "Glob", "Bash"],
+        settingSources: [],
+        env,
+        maxTurns: cfg.overview.maxTurns,
+        stderr: () => {},
+      },
+    })) {
+      if (msg.type === "assistant") {
+        for (const block of msg.message.content) {
+          if (block.type === "text") assistantText += block.text;
+        }
+      } else if (msg.type === "result") {
+        endSubtype = msg.subtype;
+        if (msg.subtype === "success") last = msg.result;
+      }
+    }
+    const answerMd = (last || assistantText).trim();
+    if (!answerMd) {
+      return { answerMd: `_Could not answer (${endSubtype || "no result"})._`, status: "failed" };
+    }
+    // Append the Q&A to the durable overview markdown.
+    const qa = `\n\n---\n\n### Q: ${question.trim()}\n\n${answerMd}\n`;
+    const fresh = getPrOverview(prKey);
+    updatePrOverview(prKey, { overviewMd: (fresh?.overviewMd ?? "") + qa });
+    return { answerMd, status: "ready" };
+  } finally {
+    await removeWorktree(pr.owner, pr.repo, wtKey).catch(() => {});
+  }
+}
+
+/** PRs with a generation/answer currently running — the in-flight double-click guard. */
 const inFlight = new Set<string>();
+
+/**
+ * Fire-and-forget entry point for a reviewer question. Runs inside the shared
+ * per-repo queue (worktree collision-safety) with the same in-flight guard as
+ * generation, and emits `pr_overview_updated` so the appended Q&A streams in.
+ */
+export function requestQuestion(prKey: string, question: string): { ok: boolean; reason?: string } {
+  const cfg = loadConfig();
+  if (!cfg.overview.enabled) return { ok: false, reason: "overview feature disabled" };
+  const q = question.trim();
+  if (!q) return { ok: false, reason: "empty question" };
+  const pr = getPrOverview(prKey);
+  if (!pr) return { ok: false, reason: "no such PR" };
+  if (isIgnoredRepo(pr.owner, pr.repo)) return { ok: false, reason: "repo not in scope" };
+  if (!pr.overviewMd) return { ok: false, reason: "generate an overview first" };
+  if (inFlight.has(prKey) || pr.overviewStatus === "generating") {
+    return { ok: false, reason: "already busy" };
+  }
+
+  inFlight.add(prKey);
+  updatePrOverview(prKey, { overviewStatus: "generating" });
+  logEvent(null, "overview_qa", `${prKey}: Q: ${q.slice(0, 120)}`);
+  emit({ type: "pr_overview_updated", prKey });
+
+  void repoQueue.run(`${pr.owner}/${pr.repo}`, async () => {
+    try {
+      const r = await answerQuestion(prKey, q);
+      logEvent(null, "overview_qa", `${prKey}: answered (${r.status})`);
+    } catch (err: any) {
+      logEvent(null, "overview_error", `${prKey} (qa): ${err?.message ?? String(err)}`);
+    } finally {
+      // Q&A never leaves the PR in a failed overview state — restore ready.
+      updatePrOverview(prKey, { overviewStatus: "ready" });
+      inFlight.delete(prKey);
+      emit({ type: "pr_overview_updated", prKey });
+    }
+  });
+  return { ok: true };
+}
 
 /**
  * Fire-and-forget entry point for the API/dashboard: mark the PR `generating`,

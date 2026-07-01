@@ -10,7 +10,7 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { ReloadOutlined, GithubOutlined } from "@ant-design/icons";
+import { ReloadOutlined, GithubOutlined, FileTextOutlined } from "@ant-design/icons";
 import type { PrGroup, ThreadSummary } from "./types";
 import { fetchConfig, fetchPrs, triggerPoll } from "./api";
 import { useEventStream } from "./useEventStream";
@@ -180,12 +180,13 @@ export function App() {
                   key={pr.prKey}
                   pr={pr}
                   selected={selected}
+                  selectedPr={selectedPr}
                   onSelect={select}
+                  onSelectPr={selectPr}
                   defaultOpen={
                     (pr.role === "author" && pr.status !== "resolved") ||
                     pr.prKey === linkedPr
                   }
-                  overviewTick={overviewTicks[pr.prKey] ?? 0}
                 />
               ))}
             </Space>
@@ -220,6 +221,13 @@ export function App() {
         >
           {selected != null ? (
             <ThreadDetailView id={selected} onChanged={reload} />
+          ) : selectedPr != null ? (
+            <div style={{ width: "100%", maxWidth: 1100 }}>
+              <OverviewPanel
+                prKey={selectedPr}
+                refreshKey={overviewTicks[selectedPr] ?? 0}
+              />
+            </div>
           ) : (
             <div
               style={{
@@ -229,7 +237,7 @@ export function App() {
                 justifyContent: "center",
               }}
             >
-              <Empty description="Select a thread to view details." />
+              <Empty description="Select a thread or PR to view details." />
             </div>
           )}
         </Content>
@@ -241,15 +249,17 @@ export function App() {
 function PrNode({
   pr,
   selected,
+  selectedPr,
   onSelect,
+  onSelectPr,
   defaultOpen,
-  overviewTick,
 }: {
   pr: PrGroup;
   selected: number | null;
+  selectedPr: string | null;
   onSelect: (id: number) => void;
+  onSelectPr: (prKey: string) => void;
   defaultOpen: boolean;
-  overviewTick: number;
 }) {
   const counts =
     pr.role === "reviewer" ? (
@@ -328,7 +338,24 @@ function PrNode({
                   onClick={() => onSelect(t.id)}
                 />
               ))}
-              <OverviewPanel prKey={pr.prKey} refreshKey={overviewTick} />
+              {/* Opens the overview + diagram in the wide main pane. */}
+              <div
+                onClick={() => onSelectPr(pr.prKey)}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  border:
+                    selectedPr === pr.prKey ? "1px solid #2f54eb" : "1px solid #f0f0f0",
+                  background: selectedPr === pr.prKey ? "#f0f3ff" : "#fafafa",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <FileTextOutlined style={{ color: "#2f54eb" }} />
+                <Text style={{ fontSize: 12 }}>Overview &amp; diagram</Text>
+              </div>
             </Space>
           ),
         },

@@ -35,6 +35,9 @@ export type OverviewStatus = "idle" | "generating" | "ready" | "failed";
 /** PR-level overview + diagram artifact (a Session-level artifact). */
 export interface PrOverview {
   prKey: string;
+  title: string;
+  url: string;
+  role: "author" | "reviewer";
   status: OverviewStatus;
   overviewMd: string | null;
   hasDiagram: boolean;

@@ -3,6 +3,8 @@ import { Button, Tooltip, message } from "antd";
 import { CopyOutlined, CheckOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github.css";
 
 /**
  * Renders GitHub-flavored markdown as a preview, with a button to copy the raw
@@ -50,7 +52,12 @@ export function Markdown({
       </Tooltip>
 
       <div className="md-body" style={{ padding: "4px 36px 12px 12px" }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        >
+          {children}
+        </ReactMarkdown>
       </div>
     </div>
   );

@@ -84,6 +84,17 @@ export async function generatePrOverview(prKey: string): Promise<void> {
   }
 }
 
+export async function askPrQuestion(prKey: string, question: string): Promise<void> {
+  const r = await fetch(`/api/prs/${encodeURIComponent(prKey)}/question`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  if (!r.ok && r.status !== 409) {
+    throw new Error((await r.json().catch(() => ({})))?.error ?? "question failed");
+  }
+}
+
 /** URL of the diagram SVG for embedding in an <img>/<object>. */
 export function prDiagramUrl(prKey: string): string {
   return `/api/prs/${encodeURIComponent(prKey)}/diagram`;

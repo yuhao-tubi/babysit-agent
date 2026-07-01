@@ -72,8 +72,9 @@ body {
   font-size: 0.88em;
 }
 .md-body pre {
-  background: #1e1e1e;
-  color: #e6e6e6;
+  background: #f6f8fa;
+  color: #24292f;
+  border: 1px solid #e1e4e8;
   padding: 12px;
   border-radius: 6px;
   overflow: auto;
