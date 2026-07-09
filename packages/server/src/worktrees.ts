@@ -23,6 +23,18 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * Like `git()` but returns stdout VERBATIM (no trim). Required for `git diff`:
+ * a diff whose final hunk line is a blank context line is emitted as a line
+ * containing a single space + trailing newline (`" \n"`). Trimming that strips
+ * the last context line, leaving the hunk one line short of its `@@` header —
+ * git then rejects it as a "corrupt patch" at apply time. Diffs must be byte-exact.
+ */
+async function gitRaw(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await exec("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+  return stdout;
+}
+
 /** Path to the persistent base clone for a repo (parked on master, holds warm deps). */
 export function clonePath(owner: string, repo: string): string {
   return join(loadConfig().reposRoot, `${owner}__${repo}`);
@@ -261,7 +273,9 @@ export async function remoteHeadSha(dir: string, headRef: string): Promise<strin
 }
 
 export async function gitDiff(dir: string): Promise<string> {
-  return git(dir, ["diff", "HEAD"]);
+  // VERBATIM (see gitRaw): trimming would drop a trailing blank context line and
+  // corrupt the patch at apply time.
+  return gitRaw(dir, ["diff", "HEAD"]);
 }
 
 /**

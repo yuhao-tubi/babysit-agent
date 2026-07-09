@@ -1,6 +1,6 @@
 import "./env.js"; // load .env before anything reads process.env
 import { loadConfig } from "./config.js";
-import { getDb, failStuckOverviews } from "./db.js";
+import { getDb, failStuckOverviews, failStuckQuizzes } from "./db.js";
 import { startPoller } from "./poller.js";
 import { recoverInterrupted, startProcessor } from "./processor.js";
 import { startServer } from "./api.js";
@@ -24,6 +24,8 @@ async function main() {
   // auto-resumed — just reset to `failed` for the owner to re-trigger.
   const reset = failStuckOverviews();
   if (reset.length) console.log(`[babysit] reset ${reset.length} stuck overview(s) to failed`);
+  const resetQuiz = failStuckQuizzes();
+  if (resetQuiz.length) console.log(`[babysit] reset ${resetQuiz.length} stuck quiz(zes) to failed`);
 
   await startServer(cfg.port);
   console.log(`[babysit] dashboard API on http://localhost:${cfg.port}`);

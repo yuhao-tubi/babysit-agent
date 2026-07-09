@@ -71,8 +71,10 @@ documented keys.
     on a passing gate. A freeform Instruction always re-proposes; it never pushes.
   - **A Proposal has two independently-approvable parts: the change and the
     reply.** Approving the change pushes/edits but does NOT post the reply;
-    approving the reply posts it but does NOT push. The Thread resolves only when
-    the change is applied (or absent) and the reply is posted or dismissed. A
+    approving the reply posts it but does NOT push. Approving EITHER part resolves
+    the Thread (the owner has acted); the other part stays approvable — the frozen
+    Proposal is kept until both parts are settled (applied/posted or dismissed/
+    absent), so its button still works on the resolved Thread. A
     `reply:` Instruction parks that text as a reply Proposal (verbatim — no agent
     run) for you to review and Post; it never posts directly. The immediate
     verbatim post is the **Reply on GitHub** button only. The instruction box's
@@ -117,4 +119,27 @@ npm run build && npm start   # production; serves built dashboard
 npm run -w @babysit/server list-prs
 npm run -w @babysit/server poll-once
 npx tsx packages/server/src/cli.ts verdict <threadId>
+```
+
+## Applying frontend changes to the running daemon
+
+The daemon serves the **prebuilt** `packages/web/dist` via `@fastify/static` — it
+does **not** bundle the web app on the fly. So a change to `packages/web/src` is
+invisible until you rebuild that bundle:
+
+```bash
+npm run -w @babysit/web build   # rebuild dist; then hard-refresh the browser
+```
+
+`@fastify/static` reads files from disk per request, so **no daemon restart is
+needed** after a web-only change — just rebuild and refresh. (For live UI work,
+`npm run dev:web` gives hot reload while proxying the API to the daemon.) Restart
+the daemon only when you change **server** source — and even then `tsx watch`
+auto-reloads it.
+
+The daemon runs under launchd (`io.tubi.babysit-agent`, `KeepAlive=true`), so
+`kill`ing it just respawns it with a new PID. To actually restart it:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/io.tubi.babysit-agent
 ```

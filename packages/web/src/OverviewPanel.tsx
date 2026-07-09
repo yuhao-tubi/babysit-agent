@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Input, Space, Spin, Tag, Typography, message } from "antd";
+import { Alert, Button, Input, Modal, Space, Spin, Tag, Typography, message } from "antd";
 import {
   FileTextOutlined,
   GithubOutlined,
@@ -8,8 +8,12 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import type { PrOverview } from "./types";
-import { askPrQuestion, fetchPrOverview, generatePrOverview, prDiagramUrl } from "./api";
+import { askPrQuestion, fetchPrOverview, generatePrOverview, generatePrQuiz } from "./api";
 import { Markdown } from "./Markdown";
+import { DiagramSet } from "./DiagramSet";
+import { RisksPanel } from "./RisksPanel";
+import { QuizPanel } from "./QuizPanel";
+import { VscodeLink } from "./prLinks";
 
 const { Title, Text } = Typography;
 
@@ -27,18 +31,30 @@ export function OverviewPanel({
 }) {
   const [ov, setOv] = useState<PrOverview | null>(null);
   const [loading, setLoading] = useState(false);
+  const [quizBusy, setQuizBusy] = useState(false);
 
   const load = useCallback(() => {
     fetchPrOverview(prKey)
-      .then(setOv)
+      .then((next) => {
+        // Guard against a stale fetch resolving after the owner switched PRs —
+        // only accept the response that matches the PR we're now showing.
+        if (next?.prKey === prKey) setOv(next);
+      })
       .catch(() => setOv(null));
+  }, [prKey]);
+
+  // Clear the previous PR's artifact the instant prKey changes — otherwise the
+  // header updates but the stale diagram (and prose) keep rendering until the
+  // new fetch resolves, showing PR B's canvas under PR A's title.
+  useEffect(() => {
+    setOv(null);
   }, [prKey]);
 
   useEffect(() => {
     load();
   }, [load, refreshKey]);
 
-  const generate = async () => {
+  const runGenerate = async () => {
     setLoading(true);
     try {
       await generatePrOverview(prKey);
@@ -48,8 +64,37 @@ export function OverviewPanel({
     }
   };
 
+  const generate = () => {
+    // Regenerate throws away the whole artifact — warn if the owner hand-edited
+    // a diagram, since those edits are the durable truth until they Regenerate.
+    if (ov?.diagramsEditedAt) {
+      Modal.confirm({
+        title: "Discard your manual diagram edits?",
+        content:
+          "You've edited and saved a diagram. Regenerating runs the agent from scratch and replaces all canvases — your manual edits will be lost.",
+        okText: "Regenerate (discard edits)",
+        okButtonProps: { danger: true },
+        cancelText: "Keep my edits",
+        onOk: runGenerate,
+      });
+      return;
+    }
+    void runGenerate();
+  };
+
+  const runQuiz = async () => {
+    setQuizBusy(true);
+    try {
+      await generatePrQuiz(prKey);
+      load();
+    } finally {
+      setQuizBusy(false);
+    }
+  };
+
   const generating = ov?.status === "generating";
   const hasArtifact = ov?.status === "ready" || (ov?.overviewMd && ov.status !== "generating");
+  const hasDiagrams = !!ov && Object.keys(ov.diagrams ?? {}).length > 0;
 
   return (
     <div style={{ padding: "4px 2px 8px" }}>
@@ -64,6 +109,7 @@ export function OverviewPanel({
               <GithubOutlined />
             </a>
           )}
+          {ov && <VscodeLink githubUrl={ov.url} />}
           {ov?.role === "reviewer" && <Tag color="purple">REVIEW</Tag>}
         </Space>
         {ov?.title && (
@@ -103,7 +149,7 @@ export function OverviewPanel({
           type="error"
           showIcon
           message="Overview generation failed"
-          description="No usable output was produced. Try Regenerate."
+          description="No usable output, or the diagram renderer is unavailable (run `make setup-render` to install Chromium). Try Regenerate."
           style={{ marginBottom: 8 }}
         />
       )}
@@ -126,26 +172,26 @@ export function OverviewPanel({
 
       {ov?.overviewMd && (
         <>
-          {ov.hasDiagram && (
-            <div
-              style={{
-                marginBottom: 12,
-                border: "1px solid #f0f0f0",
-                borderRadius: 8,
-                overflow: "auto",
-                background: "#ffffff",
-              }}
-            >
-              {/* Cache-bust by generatedAt so a regenerate reloads the SVG. */}
-              <object
-                type="image/svg+xml"
-                data={`${prDiagramUrl(prKey)}?t=${encodeURIComponent(ov.generatedAt ?? "")}`}
-                style={{ width: "100%", minHeight: 320, display: "block" }}
-                aria-label="PR architecture diagram"
-              />
-            </div>
-          )}
+          {hasDiagrams && <DiagramSet prKey={prKey} diagrams={ov.diagrams} />}
           <Markdown>{ov.overviewMd}</Markdown>
+
+          {/* Verified Risk Analysis — reviewer PRs only (produced by the same
+              Generate run). Confirmed/unverified as cards, dismissed collapsed. */}
+          {ov.role === "reviewer" && (
+            <RisksPanel risks={ov.risks ?? []} status={ov.risksStatus} />
+          )}
+
+          {/* PR-comprehension quiz — its own on-demand agent run, grounded on the
+              overview above. Multiple-choice, graded client-side. */}
+          <QuizPanel
+            prKey={prKey}
+            quiz={ov.quiz ?? []}
+            status={ov.quizStatus}
+            stale={!!ov.quizStale}
+            hasOverview={!!ov.overviewMd}
+            busy={quizBusy}
+            onGenerate={runQuiz}
+          />
 
           {/* Ask a grounded question — the agent investigates the checkout and
               appends the Q&A to the overview above. */}

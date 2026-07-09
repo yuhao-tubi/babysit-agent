@@ -1,5 +1,62 @@
 # PR Overview + Diagram — design decisions (grilling session)
 
+> **SUPERSEDED (diagram medium → EXCALIDRAW, 2026-07-07):** The abstract
+> React-Flow `DiagramSpec` graph (the block immediately below) is replaced by
+> **editable Excalidraw canvases**. The agent now AUTHORS raw `.excalidraw` JSON
+> directly (coordinates, shapes, colors) and self-corrects via a
+> **write→render→view→fix loop**: it writes each canvas to the worktree, renders
+> it to PNG with an in-package TS+Playwright+Chromium renderer (`render.ts`, a
+> port of the reference skill's `render_excalidraw.py`), Reads the PNG back, and
+> edits until the layout is clean. Decisions locked in the follow-up grilling:
+>
+> - **Pipeline (Q1=B):** full pipeline replacement — agent owns coordinates; no
+>   dagre, no React Flow. **Render loop (Q2, Q3=A, Q5=A):** the generation agent
+>   drives the loop in-worktree; the renderer is TS+Playwright+**Chromium**
+>   (esm.sh replaced by a **vendored `@excalidraw/utils`** served over loopback
+>   HTTP — offline, version-pinned; fonts render via `fontFamily:3` monospace, so
+>   the headless PNG matches the browser canvas).
+> - **Artifact (Q6=A, Q8=A):** stored as a **map of Excalidraw docs keyed by
+>   section** `{why?,what?,how?}` in the reused `diagrams_json` column (the shape
+>   changed, not the column). One canvas per 4W1H section; section switcher kept.
+> - **Frontend (Q6=A):** `DiagramSet.tsx` mounts `@excalidraw/excalidraw` in
+>   **edit mode** with a **Save** button → new **`PUT /api/prs/:key/diagrams`**
+>   (first mutating overview route; local-disk only, `dryRun`-exempt).
+> - **Save vs Regenerate (Q7=A):** single source of truth — Save overwrites the
+>   canvas and stamps `diagrams_edited_at`; Regenerate **warns before discarding**
+>   manual edits and the edit-stamp **suppresses the head-SHA staleness nag**.
+> - **Delivery (Q9=A):** agent writes `overview/{why,what,how}.excalidraw` +
+>   `overview/overview.json`; server reads the FILES back from the worktree after
+>   `query()` (verbose JSON never round-trips through output tokens).
+> - **Methodology + deps (Q10=A, Q11=A):** the reference skill's docs are
+>   **vendored** into `packages/server/src/overview-assets/` (methodology,
+>   element-templates, json-schema, **rebranded color-palette**) + the render
+>   template; the agent Reads them by absolute path. Sandbox stays sealed
+>   (`settingSources: []`). `maxTurns` raised 60 → **150** for the loop.
+> - **Failure model (Q12=B → Q13=A):** NO silent degradation — the diagrams are
+>   the point. Missing Chromium (checked up front via `chromiumAvailable()`) or a
+>   render that won't converge ⇒ the generation is `failed` with an actionable
+>   message (`make setup-render`); the daemon keeps polling, Threads untouched.
+> - **Acceptance:** Rungs 1–2 automated in `render.test.ts` (real headless render
+>   of a fixture + round-trip + failure paths; skip when Chromium absent). Rungs
+>   3–5 (CLI single-PR generation on adRise/www#33782, Save/Regenerate write
+>   path, daemon in-situ) are the manual gate.
+>
+> Everything below (the React-Flow `DiagramSpec` block and the original SVG
+> decisions) is retained for historical context only.
+
+> **SUPERSEDED (diagram delivery, 2026-07-07):** The single pre-rendered inline
+> SVG (decisions 4, 6, 7, 12, 13) has been replaced by a **4W1H diagram SET**.
+> The agent now emits ONE JSON block `{summary, overview_md, diagrams: [...]}` —
+> no `svg` block, no on-disk SVG file, no `/diagram` route. Each element of
+> `diagrams` is a `DiagramSpec` graph (nodes + edges, NO coordinates); the
+> frontend (`DiagramSet.tsx`) lays it out with **dagre** and renders it with
+> **React Flow**. Storage moved from a file path (`diagram_path`) to a
+> `diagrams_json` column on `prs`, returned inline in the overview payload. The
+> overview markdown is now structured by **4W1H** (`## Why` / `## What` /
+> `## How` / `## Risks`), and a diagram is produced for a Why/What/How idea only
+> when it has ≥3 related items. Everything below about the SVG technique is
+> retained for historical context only.
+
 > **Status: IMPLEMENTED.** Server + web build clean (`npm run build`). Files:
 > `overview.ts` (new), `db.ts` (migration + accessors), `api.ts` (3 routes),
 > `cli.ts` (`overview <prKey>`), `config.ts`/`config.example.json` (`overview`

@@ -18,6 +18,9 @@ function queueFromPrs(prs: PrGroup[]): { running: QueuedTask[]; pending: QueuedT
   const running: QueuedTask[] = [];
   const pending: QueuedTask[] = [];
   for (const pr of prs) {
+    // Expired (merged/closed) PRs are read-only history; the pipeline no longer
+    // acts on their threads, so they never count as queued work.
+    if (pr.expiredAt) continue;
     for (const t of pr.threads) {
       const task = { ...t, prKey: pr.prKey };
       if (t.status === "in_progress") running.push(task);

@@ -56,15 +56,21 @@ function replyPending(p: Proposal): boolean {
 }
 
 /**
- * Persist a mutated Proposal and derive the Thread's status from what's left:
- * `resolved` when neither part is pending, else `awaiting_approval`. Clears the
- * frozen proposal on resolve. Returns the new status.
+ * Persist a mutated Proposal and derive the Thread's status. OR semantics: a
+ * positive approval of EITHER part (change pushed/applied OR reply posted) resolves
+ * the Thread — the owner has acted, so it no longer blocks on the other part. The
+ * un-acted part stays available: we keep the frozen proposal until BOTH parts are
+ * settled (applied/posted or dismissed/absent), so its button still works after
+ * the Thread resolves. Returns the new status.
  */
 function settleProposal(s: ThreadRow, p: Proposal): ThreadRow["status"] {
-  const done = !changePending(p) && !replyPending(p);
-  updateThread(s.id, { proposal: done ? null : p });
+  const bothSettled = !changePending(p) && !replyPending(p);
+  const anyApproved = !!p.changeApplied || !!p.replyPosted;
+  // Only clear the frozen proposal once nothing is left to act on; otherwise keep
+  // it so the remaining part remains approvable on the (now resolved) Thread.
+  updateThread(s.id, { proposal: bothSettled ? null : p });
   emit({ type: "thread_updated", threadId: s.id });
-  return done ? "resolved" : "awaiting_approval";
+  return anyApproved || bothSettled ? "resolved" : "awaiting_approval";
 }
 
 export async function postReply(
@@ -413,8 +419,17 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
   try {
     // Does the reviewed diff still land on today's tree?
     if (!(await applyPatchCheck(dir, proposal.diff))) {
-      logEvent(s.id, "approve_stale", `branch advanced ${proposal.baseSha.slice(0, 7)}->${remoteSha.slice(0, 7)}; reviewed lines changed upstream`);
-      notifyEscalation(s.id, s.prKey, "the lines you reviewed were modified upstream; send an instruction to re-propose");
+      const moved = remoteSha !== proposal.baseSha;
+      if (moved) {
+        logEvent(s.id, "approve_stale", `branch advanced ${proposal.baseSha.slice(0, 7)}->${remoteSha.slice(0, 7)}; reviewed lines changed upstream`);
+        notifyEscalation(s.id, s.prKey, "the lines you reviewed were modified upstream; send an instruction to re-propose");
+      } else {
+        // HEAD is unchanged, so the patch itself won't apply — a malformed frozen
+        // diff, not upstream drift. Surface it as its own failure so it isn't
+        // misdiagnosed as a moved branch.
+        logEvent(s.id, "approve_patch_invalid", `frozen diff no longer applies at unchanged HEAD ${remoteSha.slice(0, 7)}; re-propose to rebuild it`);
+        notifyEscalation(s.id, s.prKey, "the saved proposal could not be applied; send an instruction to re-propose");
+      }
       return "blocked";
     }
     await applyPatch(dir, proposal.diff);

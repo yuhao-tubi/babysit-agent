@@ -19,6 +19,101 @@ export type VerdictAction = "propose" | "reply" | "escalate" | "amend_pr_body";
  */
 export type CiClass = "lint" | "typecheck" | "build" | "unit_test";
 
+/** The 4W1H sections a PR-overview diagram canvas can belong to. */
+export type DiagramSection = "why" | "what" | "how";
+
+/**
+ * A raw Excalidraw document — the `.excalidraw` file shape (`type:"excalidraw"`,
+ * `elements`, `appState`, `files`). The overview agent AUTHORS these directly
+ * (coordinates and all), self-correcting via the render loop; the dashboard
+ * mounts them in an editable `@excalidraw/excalidraw` canvas. We keep it loosely
+ * typed — the durable truth is whatever Excalidraw reads/writes, and we only
+ * validate the wrapper (`type` + non-empty `elements`) before persisting.
+ */
+export interface ExcalidrawDoc {
+  type: "excalidraw";
+  version?: number;
+  source?: string;
+  elements: unknown[];
+  appState?: Record<string, unknown>;
+  files?: Record<string, unknown>;
+}
+
+/**
+ * The PR-overview diagram artifact: up to one editable Excalidraw canvas per
+ * 4W1H section. Replaces the old abstract React-Flow `DiagramSpec[]`. A section
+ * is present only if the agent produced (and the render loop validated) a canvas
+ * for it; a trivial PR can have an empty map.
+ */
+export type DiagramSet = Partial<Record<DiagramSection, ExcalidrawDoc>>;
+
+/** Severity vocabulary for a Risk — reuses the Verdict `risk` levels. */
+export type RiskLevel = "low" | "medium" | "high";
+
+/**
+ * A candidate risk the FINDER pass produces for a reviewer-role PR (see
+ * CONTEXT.md). Grounded: `location` cites real lines and a PR-head permalink;
+ * `codeSnippet` is the illustrative diff hunk (preferred) or plain code; the
+ * optional `mermaid` chart is authored only when the risk earns one. The
+ * verdict is added later by the merge with the confirmer's records.
+ */
+export interface RiskCandidate {
+  /** Finder-generated, unique within one run's risks.json. */
+  id: string;
+  title: string;
+  level: RiskLevel;
+  category?: string;
+  location: { path: string; startLine: number; endLine?: number; permalink: string };
+  /** Markdown prose: what the risk is and why it matters. */
+  explanation: string;
+  /** A fenced ```diff hunk (preferred) or plain code illustrating the risk. */
+  codeSnippet: string;
+  /** Optional mermaid source; rendered client-side. Omitted for trivial risks. */
+  mermaid?: string;
+}
+
+/**
+ * A verdict-only record the CONFIRMER pass produces, keyed by the finder's risk
+ * `id`. The confirmer never re-authors the heavy content — it only judges
+ * (`confirmed`), may adjust `level`, and cites its `rationale`. The server
+ * merges these onto the finder's candidates by id.
+ */
+export interface RiskVerdictRecord {
+  id: string;
+  confirmed: boolean;
+  level?: RiskLevel;
+  rationale: string;
+}
+
+/**
+ * How a merged Risk stands after confirmation: `confirmed` (skeptic agreed it is
+ * real), `dismissed` (skeptic rejected it as a false positive, rationale kept),
+ * or `unverified` (no confirmer record matched — shown honestly, not dropped and
+ * not auto-confirmed).
+ */
+export type RiskState = "confirmed" | "dismissed" | "unverified";
+
+/** A finder candidate merged with the confirmer's judgment — the display unit. */
+export interface RiskItem extends RiskCandidate {
+  state: RiskState;
+  verdict?: { confirmed: boolean; rationale: string };
+}
+
+/**
+ * One multiple-choice PR-comprehension question. Authored by the quiz agent from
+ * a grounded read of the diff/checkout: `options` are 2–4 answers, `correctIndex`
+ * points at the right one, and `explanation` is the teaching moment shown after
+ * the owner answers (why the answer is right, citing the change). Wrong options
+ * are drawn from the OLD behavior or plausible misreadings.
+ */
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  /** 0-based index into `options` of the correct answer. */
+  correctIndex: number;
+  explanation: string;
+}
+
 export type ThreadStatus =
   | "pending"
   | "in_progress"
@@ -145,6 +240,29 @@ export interface Proposal {
   replyDismissed?: boolean;
 }
 
+/** A single commit that landed on the PR branch after a Thread stalled. */
+export interface BranchCommit {
+  sha: string;
+  message: string; // first line of the commit message
+  author: string;
+  url?: string;
+  committedAt?: string;
+}
+
+/**
+ * Commits pushed to the PR branch while a Thread sat in a WAITING state
+ * (`blocked` / `awaiting_approval` / `error`) — surfaced under Feedback as a
+ * "branch advanced" marker so the owner sees a fix may already have landed. It
+ * never re-opens the Thread (blocked stays frozen until you act); it is cleared
+ * the moment the Thread is re-worked or resolved. `base` is the head snapshotted
+ * when the Thread first entered its waiting state; `head` is the current head.
+ */
+export interface BranchAdvance {
+  base: string;
+  head: string;
+  commits: BranchCommit[];
+}
+
 /** A thread-unit: the decision unit. One per (prKey, threadKey). */
 export interface ThreadRow {
   id: number;
@@ -162,6 +280,8 @@ export interface ThreadRow {
   diff: string | null;
   /** Frozen Proposal (JSON) backing an `awaiting_approval` thread; null otherwise. */
   proposalJson: string | null;
+  /** Commits pushed to the branch while this Thread was waiting (JSON BranchAdvance); null otherwise. */
+  newCommitsJson: string | null;
   attemptCount: number;
   error: string | null;
   createdAt: string;

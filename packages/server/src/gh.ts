@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { FeedbackItem, Pr } from "./types.js";
+import type { BranchCommit, FeedbackItem, Pr } from "./types.js";
 import {
   ACTIONABLE_CONCLUSIONS,
   ciFeedbackId,
@@ -83,6 +83,35 @@ export async function getPrHead(
     "headRefName,headRefOid",
   ]);
   return { headRefName: r.headRefName, headSha: r.headRefOid };
+}
+
+/**
+ * Commits reachable from `head` but not from `base` (i.e. what landed on the
+ * branch since `base`), oldest-first. Used to annotate a waiting Thread with the
+ * fixes pushed after it stalled. Returns [] if the range is empty or unresolvable.
+ */
+export async function compareCommits(
+  owner: string,
+  repo: string,
+  base: string,
+  head: string
+): Promise<BranchCommit[]> {
+  if (!base || !head || base === head) return [];
+  const r = await ghJson<{
+    commits: {
+      sha: string;
+      html_url: string;
+      commit: { message: string; author: { name?: string; date?: string } };
+      author: { login?: string } | null;
+    }[];
+  }>(["api", `repos/${owner}/${repo}/compare/${base}...${head}`]);
+  return (r.commits ?? []).map((c) => ({
+    sha: c.sha,
+    message: (c.commit.message ?? "").split("\n")[0],
+    author: c.author?.login ?? c.commit.author?.name ?? "unknown",
+    url: c.html_url,
+    committedAt: c.commit.author?.date,
+  }));
 }
 
 /** Current PR description (body markdown). */

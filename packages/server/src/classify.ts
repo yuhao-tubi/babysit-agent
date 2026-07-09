@@ -22,6 +22,19 @@ export function isOwnAuthor(login: string): boolean {
   return login.toLowerCase() === cfg.githubLogin.toLowerCase();
 }
 
+/**
+ * Whether an author's feedback is ignored entirely (`ignoreAuthors` config):
+ * never triaged, no Verdict — the Thread is marked resolved directly. Matches
+ * case-insensitively on the login with or without a trailing "[bot]" suffix, so
+ * a bare `github-actions` entry catches the `github-actions[bot]` login.
+ */
+export function isIgnoredAuthor(login: string): boolean {
+  const cfg = loadConfig();
+  const bare = (s: string) => s.toLowerCase().replace(/\[bot\]$/, "");
+  const target = bare(login);
+  return cfg.ignoreAuthors.some((a) => bare(a) === target);
+}
+
 function repoMatches(owner: string, repo: string, entries: string[]): boolean {
   const full = `${owner}/${repo}`.toLowerCase();
   const name = repo.toLowerCase();

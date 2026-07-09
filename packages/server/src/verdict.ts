@@ -113,19 +113,80 @@ function buildCiPrompt(
   return lines.join("\n");
 }
 
-function parseVerdict(text: string, isCi = false): Verdict {
-  // Grab the last fenced json block.
-  const matches = [...text.matchAll(/```json\s*([\s\S]*?)```/gi)];
-  const raw = matches.length ? matches[matches.length - 1][1] : text;
-  let obj: any;
-  try {
-    obj = JSON.parse(raw.trim());
-  } catch {
-    // Last resort: find the outermost {...}.
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error(`verdict not parseable: ${text.slice(0, 200)}`);
-    obj = JSON.parse(m[0]);
+/**
+ * Scan `text` for every balanced `{...}` region, brace-counting while skipping
+ * over string literals (so braces inside JSON string values never miscount) and
+ * their escapes. Returns the spans in the order they START. String-awareness is
+ * what makes this robust to nested markdown fences: a ```` ```json ```` block
+ * whose `reply_draft` value itself contains a ```` ``` ```` fence no longer
+ * truncates the match (the old non-greedy `/```json...```/` regex closed on that
+ * inner fence and cut the JSON in half — that is what turned a valid `propose`
+ * into a "not parseable" escalate).
+ */
+function balancedJsonSpans(text: string): string[] {
+  const spans: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          spans.push(text.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
   }
+  return spans;
+}
+
+/**
+ * Extract the verdict object from the agent's free-form output. The verdict is
+ * the LAST balanced JSON object that parses and carries a recognized `action`,
+ * so trailing prose, reasoning, and nested code fences are all tolerated. Throws
+ * only when no candidate parses into a verdict-shaped object.
+ */
+export function extractVerdictObject(text: string): any {
+  const spans = balancedJsonSpans(text);
+  // Walk from the end: the verdict block is emitted last, after any investigation
+  // prose or illustrative snippets.
+  for (let i = spans.length - 1; i >= 0; i--) {
+    let obj: any;
+    try {
+      obj = JSON.parse(spans[i]);
+    } catch {
+      continue;
+    }
+    if (obj && typeof obj === "object" && typeof obj.action === "string") return obj;
+  }
+  // Fallback: nothing action-shaped parsed — try the last parseable object at all
+  // (covers a verdict the model shaped oddly) before giving up.
+  for (let i = spans.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(spans[i]);
+    } catch {
+      /* keep scanning */
+    }
+  }
+  throw new Error(`verdict not parseable: ${text.slice(0, 200)}`);
+}
+
+export function parseVerdict(text: string, isCi = false): Verdict {
+  const obj = extractVerdictObject(text);
   const action = obj.action;
   // CI verdicts are propose | escalate only (decision Q8); any other action
   // (including a malformed one) coerces to escalate rather than throwing.

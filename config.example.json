@@ -16,6 +16,7 @@
     "codex-connector[bot]",
     "github-actions[bot]"
   ],
+  "ignoreAuthors": ["tubi-laborador", "github-actions"],
   "ignoreRepos": ["adRise/chatgpt-app"],
   "allowRepos": ["adRise/www"],
   "autoPushClasses": [],
@@ -35,7 +36,7 @@
   },
   "overview": {
     "enabled": true,
-    "maxTurns": 60
+    "maxTurns": 150
   },
   "comment": "Copy to config.json and edit. Bedrock auth uses KeySmith — set KEYSMITH_* in .env (see .env.example). bedrockModelName is the KeySmith friendly model name, resolved to an inference-profile ARN at runtime. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action. autoPushClasses lists author classes (\"ci\"/\"bot\"/\"human\") allowed to push without owner approval when the gate passes; default [] means every change parks at awaiting_approval for you to Approve (risk:high always parks regardless)."
 }

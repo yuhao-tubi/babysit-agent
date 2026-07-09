@@ -3,6 +3,7 @@ import {
   getThread,
   getThreadItems,
   interruptedInstruction,
+  isPrExpired,
   listThreads,
   logEvent,
   threadAttemptCount,
@@ -11,7 +12,7 @@ import {
 } from "./db.js";
 import { getChecks, getResolvedThreadKeys, resolveReviewThread } from "./gh.js";
 import { ACTIONABLE_CONCLUSIONS, cleanupCiLog } from "./ci.js";
-import { isIgnoredRepo } from "./classify.js";
+import { isIgnoredAuthor, isIgnoredRepo } from "./classify.js";
 import { runVerdict } from "./verdict.js";
 import {
   approveProposal,
@@ -39,6 +40,28 @@ export async function processThread(id: number): Promise<void> {
     logEvent(id, "skipped_repo", `${s.owner}/${s.repo} not in scope`);
     finalize(id, "resolved");
     return;
+  }
+
+  // Never act on a thread whose PR has expired (merged/closed since last poll).
+  // The PR + its threads are retained for history in the "Expired" section, but
+  // the pipeline must not push/reply against a PR that is no longer open. Leave
+  // the thread in its current state rather than finalizing — it's frozen history.
+  if (isPrExpired(s.prKey)) {
+    logEvent(id, "skipped_expired", `${s.prKey} is merged/closed; not acting`);
+    return;
+  }
+
+  // Ignored-author scope is authoritative for the whole pipeline too, not just
+  // polling: a Thread queued before `ignoreAuthors` gained an entry must resolve
+  // without a Verdict rather than get triaged. CI threads are exempt (synthetic
+  // author). The root author is the earliest item's (items are created-at ordered).
+  if (s.authorClass !== "ci") {
+    const rootAuthor = getThreadItems(id)[0]?.author;
+    if (rootAuthor && isIgnoredAuthor(rootAuthor)) {
+      logEvent(id, "skipped_author", `${rootAuthor} on ignoreAuthors; resolved without verdict`);
+      finalize(id, "resolved");
+      return;
+    }
   }
 
   await queue.run(`${s.owner}/${s.repo}`, async () => {
@@ -143,12 +166,19 @@ export async function applyInstruction(id: number, instruction: string): Promise
 export async function approveThread(id: number): Promise<void> {
   const s = getThread(id);
   if (!s) throw new Error(`no thread #${id}`);
+  if (!s.proposalJson) return;
+  // Reflect the click SYNCHRONOUSLY — before entering the serial queue — so a
+  // refresh reads the approved/working state even while this job waits behind
+  // other in-flight repo work. (Previously the status only flipped once the queued
+  // job started running; a long re-gate ahead of it made the click look ignored.)
+  // The `approve` event with no later `finalized` also lets restart-recovery
+  // re-drive an interrupted apply+push.
+  updateThread(id, { status: "in_progress", error: null });
+  logEvent(id, "approve", "owner approved the proposal");
+  emit({ type: "thread_updated", threadId: id });
   await queue.run(`${s.owner}/${s.repo}`, async () => {
     const fresh = getThread(id);
     if (!fresh || !fresh.proposalJson) return;
-    updateThread(id, { status: "in_progress", error: null });
-    logEvent(id, "approve", "owner approved the proposal");
-    emit({ type: "thread_updated", threadId: id });
     try {
       const status = await approveProposal(fresh);
       finalize(id, status);
@@ -169,12 +199,15 @@ export async function approveThread(id: number): Promise<void> {
 export async function approveReply(id: number): Promise<void> {
   const s = getThread(id);
   if (!s) throw new Error(`no thread #${id}`);
+  if (!s.proposalJson) return;
+  // Flip status + log the approval synchronously (see approveThread) so a refresh
+  // sees the click immediately even while queued behind other repo work.
+  updateThread(id, { status: "in_progress", error: null });
+  logEvent(id, "approve", "owner approved the reply");
+  emit({ type: "thread_updated", threadId: id });
   await queue.run(`${s.owner}/${s.repo}`, async () => {
     const fresh = getThread(id);
     if (!fresh || !fresh.proposalJson) return;
-    updateThread(id, { status: "in_progress", error: null });
-    logEvent(id, "approve", "owner approved the reply");
-    emit({ type: "thread_updated", threadId: id });
     try {
       const status = await postReplyProposal(fresh);
       finalize(id, status);

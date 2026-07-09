@@ -7,6 +7,8 @@ export type AppEvent =
   // PR-level (Session) overview artifact progressed. Keyed by prKey — the first
   // event not keyed by a numeric threadId.
   | { type: "pr_overview_updated"; prKey: string }
+  // PR-level quiz artifact progressed. Keyed by prKey, like the overview event.
+  | { type: "pr_quiz_updated"; prKey: string }
   | { type: "notification"; prKey: string; threadId: number; message: string };
 
 const bus = new EventEmitter();

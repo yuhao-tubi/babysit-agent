@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
-import { existsSync, createReadStream } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,10 +10,15 @@ import {
   listThreads,
   listPrsWithThreads,
   listReviewerPrs,
+  listExpiredPrs,
   lastPollTime,
   getPrOverview,
+  updatePrOverview,
 } from "./db.js";
 import { requestOverview, requestQuestion } from "./overview.js";
+import { requestQuiz } from "./quiz.js";
+import { isIgnoredRepo } from "./classify.js";
+import type { DiagramSection, DiagramSet, ExcalidrawDoc } from "./types.js";
 import {
   applyInstruction,
   approveThread,
@@ -26,7 +31,7 @@ import {
 } from "./processor.js";
 import { pollOnce } from "./poller.js";
 import { refineText } from "./refine.js";
-import { onEvent } from "./events.js";
+import { onEvent, emit } from "./events.js";
 import { loadConfig } from "./config.js";
 import type { ThreadStatus } from "./types.js";
 
@@ -37,6 +42,7 @@ function threadView(id: number) {
     ...s,
     verdict: s.verdictJson ? JSON.parse(s.verdictJson) : null,
     proposal: s.proposalJson ? JSON.parse(s.proposalJson) : null,
+    newCommits: s.newCommitsJson ? JSON.parse(s.newCommitsJson) : null,
     items: getThreadItems(id),
     events: getEvents(id),
   };
@@ -70,8 +76,10 @@ export async function startServer(port: number): Promise<void> {
     // threads). Reviewer rows render for the overview panel only.
     const authored = listPrsWithThreads();
     const reviewer = listReviewerPrs();
-    const prs = [...authored, ...reviewer];
-    const out = prs.map((p) => {
+    // Expired PRs (merged/closed) are RETAINED and surfaced in their own section;
+    // the dashboard splits the list on the `expiredAt` field.
+    const expired = listExpiredPrs();
+    const toGroup = (p: (typeof authored)[number]) => {
       const ts = threads.filter((t) => t.prKey === p.prKey);
       const status = rollupStatus(ts.map((t) => t.status));
       const counts = {
@@ -88,6 +96,7 @@ export async function startServer(port: number): Promise<void> {
         status,
         counts,
         lastPolled: p.lastPolled,
+        expiredAt: p.expiredAt,
         threads: ts.map((t) => ({
           id: t.id,
           status: t.status,
@@ -98,13 +107,15 @@ export async function startServer(port: number): Promise<void> {
           updatedAt: t.updatedAt,
         })),
       };
-    });
+    };
+    const out = [...authored, ...reviewer].map(toGroup);
     // blocked PRs first, then awaiting approval, then ongoing, then resolved.
     // Reviewer PRs (no threads → "resolved" rollup) naturally sort last.
     const rank = (s: ThreadStatus) =>
       s === "blocked" ? 0 : s === "awaiting_approval" ? 1 : s === "pending" ? 2 : 3;
     out.sort((a, b) => rank(a.status) - rank(b.status));
-    return out;
+    // Expired PRs keep their own most-recently-expired-first order, appended last.
+    return [...out, ...expired.map(toGroup)];
   });
 
   // ---- PR-level overview + diagram (a Session artifact). Keyed by prKey,
@@ -115,9 +126,20 @@ export async function startServer(port: number): Promise<void> {
     const prKey = decodeURIComponent(req.params.key);
     const pr = getPrOverview(prKey);
     if (!pr) return reply.code(404).send({ error: "not found" });
-    // Stale when the artifact was built against a head that has since moved.
+    // Stale when the artifact was built against a head that has since moved —
+    // but once the owner has hand-edited a canvas, they own it, so suppress the
+    // staleness nag (a Regenerate would discard their edits anyway).
     const stale =
-      !!pr.overviewHeadSha && !!pr.headSha && pr.overviewHeadSha !== pr.headSha;
+      !pr.diagramsEditedAt &&
+      !!pr.overviewHeadSha &&
+      !!pr.headSha &&
+      pr.overviewHeadSha !== pr.headSha;
+    // The quiz is AUTO-INVALIDATED when the head moves (decision): if the quiz
+    // was built against a different head than the live one, serve it as absent so
+    // the owner can't take an outdated quiz — they must Regenerate.
+    const quizStale =
+      !!pr.quizHeadSha && !!pr.headSha && pr.quizHeadSha !== pr.headSha;
+    const quizReady = pr.quizStatus === "ready" && !quizStale;
     return {
       prKey: pr.prKey,
       title: pr.title,
@@ -125,12 +147,31 @@ export async function startServer(port: number): Promise<void> {
       role: pr.role,
       status: pr.overviewStatus,
       overviewMd: pr.overviewMd,
-      hasDiagram: !!pr.diagramPath,
+      diagrams: pr.diagrams,
       overviewHeadSha: pr.overviewHeadSha,
       currentHeadSha: pr.headSha,
       generatedAt: pr.overviewGeneratedAt,
+      diagramsEditedAt: pr.diagramsEditedAt,
       stale,
+      // Verified Risk Analysis (reviewer PRs) — merged items + independent status.
+      risks: pr.risks,
+      risksStatus: pr.risksStatus,
+      // PR-comprehension quiz. Questions are withheld while generating and when
+      // stale (head moved) so the UI prompts a Regenerate rather than serving an
+      // outdated quiz. `quizStatus` still reflects the raw row state.
+      quiz: quizReady ? pr.quiz : [],
+      quizStatus: pr.quizStatus,
+      quizStale,
     };
+  });
+
+  // Trigger quiz (re)generation for a PR. Fire-and-forget; progress arrives via
+  // the `pr_quiz_updated` SSE event. Requires an existing overview.
+  app.post<{ Params: { key: string } }>("/api/prs/:key/quiz", async (req, reply) => {
+    const prKey = decodeURIComponent(req.params.key);
+    const r = requestQuiz(prKey);
+    if (!r.ok) return reply.code(409).send({ error: r.reason });
+    return { ok: true };
   });
 
   // Trigger (re)generation. Fire-and-forget; progress arrives via SSE.
@@ -155,18 +196,41 @@ export async function startServer(port: number): Promise<void> {
     }
   );
 
-  // Stream the generated SVG diagram from the DB-recorded path (never a static
-  // mount over the state dir — the path is resolved only from the row).
-  app.get<{ Params: { key: string } }>("/api/prs/:key/diagram", async (req, reply) => {
-    const prKey = decodeURIComponent(req.params.key);
-    const pr = getPrOverview(prKey);
-    if (!pr?.diagramPath || !existsSync(pr.diagramPath)) {
-      return reply.code(404).send({ error: "no diagram" });
+  // Save a hand-edited diagram canvas (the dashboard's Save button). This is the
+  // FIRST mutating overview route — the owner edits an Excalidraw canvas and
+  // persists it. Local-disk only (SQLite), so it is exempt from `dryRun` (which
+  // gates GitHub writes, not our own state). Overwrites the section's canvas
+  // (single source of truth, Q7) and stamps `diagramsEditedAt` so Regenerate
+  // knows to warn and the staleness nag is suppressed.
+  app.put<{ Params: { key: string }; Body: { section?: string; doc?: unknown } }>(
+    "/api/prs/:key/diagrams",
+    async (req, reply) => {
+      const prKey = decodeURIComponent(req.params.key);
+      const pr = getPrOverview(prKey);
+      if (!pr) return reply.code(404).send({ error: "not found" });
+      if (isIgnoredRepo(pr.owner, pr.repo)) {
+        return reply.code(409).send({ error: "repo not in scope" });
+      }
+      const section = req.body?.section as DiagramSection | undefined;
+      if (section !== "why" && section !== "what" && section !== "how") {
+        return reply.code(400).send({ error: "section must be why|what|how" });
+      }
+      const doc = req.body?.doc as ExcalidrawDoc | undefined;
+      // Minimal structural validation — same wrapper check the renderer enforces.
+      if (
+        !doc ||
+        typeof doc !== "object" ||
+        (doc as any).type !== "excalidraw" ||
+        !Array.isArray((doc as any).elements)
+      ) {
+        return reply.code(400).send({ error: "doc must be a valid excalidraw document" });
+      }
+      const next: DiagramSet = { ...pr.diagrams, [section]: doc };
+      updatePrOverview(prKey, { diagrams: next, diagramsEditedAt: new Date().toISOString() });
+      emit({ type: "pr_overview_updated", prKey });
+      return { ok: true };
     }
-    reply.header("Content-Type", "image/svg+xml");
-    reply.header("Cache-Control", "no-cache");
-    return reply.send(createReadStream(pr.diagramPath));
-  });
+  );
 
   app.get<{ Params: { id: string } }>("/api/threads/:id", async (req, reply) => {
     const view = threadView(Number(req.params.id));
@@ -209,20 +273,23 @@ export async function startServer(port: number): Promise<void> {
   app.post<{ Params: { id: string } }>("/api/threads/:id/approve", async (req, reply) => {
     const s = getThread(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: "not found" });
-    if (s.status !== "awaiting_approval" || !s.proposalJson) {
-      return reply.code(409).send({ error: "no proposal awaiting approval" });
+    // A frozen proposal is enough — the Thread may already be `resolved` because the
+    // OTHER part (the reply) was approved first, yet the change is still pushable.
+    if (!s.proposalJson) {
+      return reply.code(409).send({ error: "no proposal to approve" });
     }
     void approveThread(Number(req.params.id));
     return { ok: true };
   });
 
   // Approve a parked proposal's drafted REPLY (the reply half of a two-part
-  // proposal). Posts it to GitHub; resolves the Thread if the change is also done.
+  // proposal). Posts it to GitHub. Either part approved on its own resolves the
+  // Thread; the other stays approvable while a frozen proposal remains.
   app.post<{ Params: { id: string } }>("/api/threads/:id/approve-reply", async (req, reply) => {
     const s = getThread(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: "not found" });
-    if (s.status !== "awaiting_approval" || !s.proposalJson) {
-      return reply.code(409).send({ error: "no proposal awaiting approval" });
+    if (!s.proposalJson) {
+      return reply.code(409).send({ error: "no proposal to approve" });
     }
     void approveReply(Number(req.params.id));
     return { ok: true };

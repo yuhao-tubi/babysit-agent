@@ -41,6 +41,8 @@ import {
 import { StatusTag } from "./status";
 import { Markdown } from "./Markdown";
 import { RelativeTime } from "./RelativeTime";
+import { DiffView } from "./DiffView";
+import { prUrl, VscodeLink } from "./prLinks";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -60,12 +62,6 @@ const RISK_COLOR: Record<string, string> = {
   medium: "warning",
   high: "error",
 };
-
-/** GitHub PR URL from a prKey of the form `owner/repo#number`. */
-function prUrl(prKey: string): string | null {
-  const m = prKey.match(/^(.+?)\/(.+?)#(\d+)$/);
-  return m ? `https://github.com/${m[1]}/${m[2]}/pull/${m[3]}` : null;
-}
 
 /** Copy the manual-plan brief to the clipboard for pasting into Claude Code. */
 async function copyPlan(text: string): Promise<void> {
@@ -163,10 +159,21 @@ export function ThreadDetailView({
 
   const approve = async () => {
     setApproving(true);
-    await approveThread(id);
-    setApproving(false);
-    onChanged();
-    load();
+    try {
+      await approveThread(id);
+      // The push runs asynchronously on the server (re-check HEAD → re-run gate →
+      // fast-forward push), which can take a while. Tell the owner it's in flight;
+      // the outcome arrives as a live status change (resolved) or a toast (if it
+      // couldn't complete). Without this the spinner cleared instantly and a failed
+      // push looked like nothing happened.
+      message.info("Re-checking against the latest HEAD and pushing… you'll see the result here.");
+    } catch (e: any) {
+      message.error(e?.message ?? "Couldn't start the push");
+    } finally {
+      setApproving(false);
+      onChanged();
+      load();
+    }
   };
 
   const postReply = async () => {
@@ -230,6 +237,10 @@ export function ThreadDetailView({
                 <GithubOutlined />
               </a>
             )}
+            <VscodeLink
+              githubUrl={prUrl(detail.prKey)}
+              style={{ marginInlineStart: 8, fontSize: 18 }}
+            />
           </Title>
           <Space size={8} style={{ marginTop: 4 }}>
             <Text type="secondary">{detail.threadKey}</Text>
@@ -349,8 +360,21 @@ export function ThreadDetailView({
               >
                 Copy plan
               </Button>
+            ) : detail.status === "in_progress" && !detail.proposal.changeApplied ? (
+              // The approval is in flight (queued/running on the server: re-check
+              // HEAD → re-gate → push). Show it so the click is visibly registered
+              // even while a long re-gate runs — the button won't reappear until
+              // the server reports a terminal status.
+              <Space>
+                <Spin size="small" />
+                <Text type="secondary">
+                  {detail.proposal.kind === "code" ? "Re-checking & pushing…" : "Applying…"}
+                </Text>
+              </Space>
             ) : (
-              detail.status === "awaiting_approval" &&
+              // Approvable whenever the change part is still pending — even if the
+              // Thread already `resolved` because the reply was approved first. Each
+              // part is independent; approving one never forecloses the other.
               !detail.proposal.changeApplied && (
                 <Button
                   type="primary"
@@ -379,16 +403,12 @@ export function ThreadDetailView({
             )
           )}
           {detail.proposal.kind === "code" && detail.proposal.diff && (
-            <Pre maxHeight={360} mono>
-              {detail.proposal.diff}
-            </Pre>
+            <DiffView maxHeight={360} diff={detail.proposal.diff} />
           )}
           {detail.proposal.kind === "pr_body" && (
             <>
               {detail.proposal.bodyDiff && (
-                <Pre maxHeight={360} mono>
-                  {detail.proposal.bodyDiff}
-                </Pre>
+                <DiffView maxHeight={360} diff={detail.proposal.bodyDiff} />
               )}
               <Title level={5} style={{ marginTop: 12 }}>
                 New description (preview)
@@ -423,32 +443,34 @@ export function ThreadDetailView({
               </Space>
             }
             extra={
-              detail.status === "awaiting_approval" && (
-                <Space>
-                  <Button
-                    icon={<CopyOutlined />}
-                    onClick={() => copyPlan(detail.proposal!.replyDraft!)}
-                    title="Copy the draft so you can refine it in the instruction box below"
-                  >
-                    Copy
-                  </Button>
-                  <Button
-                    loading={dismissingReply}
-                    onClick={skipReply}
-                    title="Don't post this reply (you'll reply by hand, or no reply is needed)"
-                  >
-                    Dismiss
-                  </Button>
-                  <Button
-                    type="primary"
-                    icon={<CommentOutlined />}
-                    loading={postingReply}
-                    onClick={postReply}
-                  >
-                    Post reply
-                  </Button>
-                </Space>
-              )
+              // Independent of the Thread's overall status: the reply stays
+              // postable even after the Thread `resolved` because the change was
+              // approved first. The card itself is only rendered while the reply is
+              // neither posted nor dismissed (see condition above).
+              <Space>
+                <Button
+                  icon={<CopyOutlined />}
+                  onClick={() => copyPlan(detail.proposal!.replyDraft!)}
+                  title="Copy the draft so you can refine it in the instruction box below"
+                >
+                  Copy
+                </Button>
+                <Button
+                  loading={dismissingReply}
+                  onClick={skipReply}
+                  title="Don't post this reply (you'll reply by hand, or no reply is needed)"
+                >
+                  Dismiss
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<CommentOutlined />}
+                  loading={postingReply}
+                  onClick={postReply}
+                >
+                  Post reply
+                </Button>
+              </Space>
             }
           >
             <Paragraph type="secondary" style={{ fontSize: 12 }}>
@@ -492,11 +514,51 @@ export function ThreadDetailView({
         </Space>
       </Card>
 
+      {detail.newCommits && detail.newCommits.commits.length > 0 && (
+        <Card
+          size="small"
+          title={
+            <Space>
+              <Text strong>Branch advanced</Text>
+              <Tag color="gold">
+                {detail.newCommits.commits.length} new commit
+                {detail.newCommits.commits.length === 1 ? "" : "s"}
+              </Tag>
+            </Space>
+          }
+        >
+          <Paragraph type="secondary" style={{ fontSize: 12 }}>
+            Commits pushed to the branch since this thread stalled — a fix may
+            already have landed. This does not resolve the thread; if it's
+            addressed, use “Mark resolved”.
+          </Paragraph>
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            {detail.newCommits.commits.map((c) => (
+              <Space key={c.sha} size={8} wrap>
+                {c.url ? (
+                  <a href={c.url} target="_blank" rel="noreferrer">
+                    <Text code style={{ fontSize: 12 }}>
+                      {c.sha.slice(0, 7)}
+                    </Text>
+                  </a>
+                ) : (
+                  <Text code style={{ fontSize: 12 }}>
+                    {c.sha.slice(0, 7)}
+                  </Text>
+                )}
+                <Text style={{ fontSize: 13 }}>{c.message}</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {c.author}
+                </Text>
+              </Space>
+            ))}
+          </Space>
+        </Card>
+      )}
+
       {detail.diff && (
         <Card size="small" title="Applied diff">
-          <Pre maxHeight={360} mono>
-            {detail.diff}
-          </Pre>
+          <DiffView maxHeight={360} diff={detail.diff} />
         </Card>
       )}
 
@@ -639,9 +701,7 @@ export function ThreadDetailView({
                     <Tag style={{ marginInlineEnd: 0 }}>{e.kind}</Tag>
                     <RelativeTime at={e.at} />
                   </Space>
-                  <Text style={{ fontSize: 13, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                    {e.message}
-                  </Text>
+                  <EventMessage message={e.message} />
                 </Space>
               ),
             }))}
@@ -649,6 +709,52 @@ export function ThreadDetailView({
         )}
       </Card>
     </Space>
+  );
+}
+
+/** Number of lines (or characters) beyond which an event message is folded. */
+const EVENT_FOLD_LINES = 8;
+const EVENT_FOLD_CHARS = 600;
+
+/**
+ * An Activity event message. Long messages (multi-line command output like a
+ * gate log) are folded to a preview with a "Show more" toggle so the timeline
+ * stays scannable; short ones render inline as before.
+ */
+function EventMessage({ message }: { message: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = message.split("\n");
+  const isLong = lines.length > EVENT_FOLD_LINES || message.length > EVENT_FOLD_CHARS;
+
+  const shown =
+    isLong && !expanded
+      ? lines.slice(0, EVENT_FOLD_LINES).join("\n").slice(0, EVENT_FOLD_CHARS)
+      : message;
+
+  return (
+    <div>
+      <Text
+        style={{
+          fontSize: 13,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          display: "block",
+        }}
+      >
+        {shown}
+        {isLong && !expanded && "…"}
+      </Text>
+      {isLong && (
+        <Button
+          type="link"
+          size="small"
+          style={{ padding: 0, height: "auto", fontSize: 12 }}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </Button>
+      )}
+    </div>
   );
 }
 

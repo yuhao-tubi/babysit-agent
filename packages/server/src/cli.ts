@@ -11,6 +11,7 @@ import { pollOnce } from "./poller.js";
 import { getThread, getThreadItems, listThreads, updateThread } from "./db.js";
 import { runVerdict } from "./verdict.js";
 import { generateOverview } from "./overview.js";
+import { renderExcalidraw } from "./render.js";
 import { getPrOverview } from "./db.js";
 import { runGate } from "./gate.js";
 import { clonePath } from "./worktrees.js";
@@ -80,17 +81,47 @@ async function main() {
       break;
     }
     case "overview": {
-      // Read-only PR-level overview + diagram generation. The PR must already
-      // be in the DB (run poll-once first). Writes the SVG + prints the overview.
+      // Read-only PR-level overview + diagram-set generation. The PR must already
+      // be in the DB (run poll-once first). Prints the overview + diagram set.
       const prKey = process.argv[3];
       if (!prKey) throw new Error("usage: cli.ts overview <owner/repo#number>");
       if (!getPrOverview(prKey)) throw new Error(`no PR ${prKey} in db — run poll-once first`);
       const r = await generateOverview(prKey);
-      console.log(`status: ${r.status}  head: ${r.headSha}  svg: ${r.svg ? "yes" : "none"}`);
+      const sections = Object.keys(r.diagrams);
+      console.log(
+        `status: ${r.status}  head: ${r.headSha}  canvases: ${sections.length} [${sections.join(", ")}]`
+      );
       console.log("--- overview ---");
       console.log(r.overviewMd);
-      const saved = getPrOverview(prKey);
-      if (saved?.diagramPath) console.log(`\ndiagram: ${saved.diagramPath}`);
+      for (const [section, doc] of Object.entries(r.diagrams)) {
+        console.log(`\n[${section}] excalidraw canvas — ${doc?.elements.length ?? 0} elements`);
+      }
+      if (r.risksStatus != null) printRisks(r.risksStatus, r.risks ?? []);
+      break;
+    }
+    case "analyze-risks": {
+      // Reviewer-role Verified Risk Analysis. Runs the SAME generation chain
+      // (overview → finder → confirmer) and prints the merged risk artifact.
+      // Read-only w.r.t. GitHub. The PR must be in the DB with role=reviewer.
+      const prKey = process.argv[3];
+      if (!prKey) throw new Error("usage: cli.ts analyze-risks <owner/repo#number>");
+      const pr = getPrOverview(prKey);
+      if (!pr) throw new Error(`no PR ${prKey} in db — run poll-once first`);
+      if (pr.role !== "reviewer") {
+        console.warn(`note: ${prKey} role=${pr.role} — risk analysis only runs for reviewer PRs`);
+      }
+      const r = await generateOverview(prKey);
+      console.log(`overview status: ${r.status}  head: ${r.headSha}`);
+      printRisks(r.risksStatus ?? null, r.risks ?? []);
+      break;
+    }
+    case "render": {
+      // Render an .excalidraw file to a PNG (used by the overview agent's
+      // write→render→view→fix loop, and for manual renderer verification).
+      const file = process.argv[3];
+      if (!file) throw new Error("usage: cli.ts render <file.excalidraw>");
+      const r = await renderExcalidraw(file);
+      console.log(`${r.pngPath} (${r.width}x${r.height})`);
       break;
     }
     case "gate": {
@@ -102,8 +133,17 @@ async function main() {
       break;
     }
     default:
-      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|process <id>|retry-errors|gate <repo>>");
+      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|process <id>|retry-errors|gate <repo>>");
       process.exit(1);
+  }
+}
+
+/** Pretty-print the merged risk artifact for the CLI verbs. */
+function printRisks(status: "ready" | "failed" | null, risks: { title: string; level: string; state: string; location: { path: string; startLine: number }; verdict?: { rationale: string } }[]): void {
+  console.log(`\n--- risks (${status ?? "n/a"}) — ${risks.length} item(s) ---`);
+  for (const r of risks) {
+    console.log(`  [${r.level.toUpperCase()}] (${r.state}) ${r.title}  @ ${r.location.path}:${r.location.startLine}`);
+    if (r.verdict?.rationale) console.log(`      ↳ ${r.verdict.rationale.slice(0, 160)}`);
   }
 }
 

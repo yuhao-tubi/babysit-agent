@@ -6,6 +6,7 @@ export type AppEvent =
   | { type: "thread_created"; threadId: number }
   | { type: "thread_updated"; threadId: number }
   | { type: "pr_overview_updated"; prKey: string }
+  | { type: "pr_quiz_updated"; prKey: string }
   | { type: "notification"; prKey: string; threadId: number; message: string };
 
 /** Subscribe to the server SSE stream; calls onEvent for each app event. */

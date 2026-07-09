@@ -1,12 +1,25 @@
 import { loadConfig } from "./config.js";
-import { collectFeedback, getPrHead, listAuthoredPrs, listReviewRequestedPrs } from "./gh.js";
-import { classifyAuthor, isCiEnabledRepo, isIgnoredRepo, isOwnAuthor } from "./classify.js";
+import {
+  collectFeedback,
+  compareCommits,
+  getPrHead,
+  listAuthoredPrs,
+  listReviewRequestedPrs,
+} from "./gh.js";
+import {
+  classifyAuthor,
+  isCiEnabledRepo,
+  isIgnoredAuthor,
+  isIgnoredRepo,
+  isOwnAuthor,
+} from "./classify.js";
 import type { FeedbackItem } from "./types.js";
 import { cleanupCiLog } from "./ci.js";
 import {
   createThread,
   getThreadByKey,
   hasSeenFeedback,
+  listWaitingThreads,
   logEvent,
   pruneClosedPrs,
   recordFeedback,
@@ -46,10 +59,11 @@ export async function pollOnce(): Promise<PollResult> {
   const authoredKeys = new Set(prs.map((p) => `${p.owner}/${p.repo}#${p.number}`));
   const reviewerPrs = cfg.overview.enabled ? await listReviewRequestedPrs() : [];
 
-  // The watch list observes open PRs only: drop any stored PR (merged/closed
-  // since last poll) that's no longer in the live open set. Built from every
-  // authored-open AND review-requested PR — including ignored repos — so repo
-  // scope alone never prunes a still-open PR.
+  // The watch list observes open PRs only: mark EXPIRED any stored PR
+  // (merged/closed since last poll) that's no longer in the live open set — it's
+  // retained as read-only history, not deleted. Built from every authored-open
+  // AND review-requested PR — including ignored repos — so repo scope alone never
+  // expires a still-open PR.
   pruneClosedPrs([
     ...authoredKeys,
     ...reviewerPrs.map((p) => `${p.owner}/${p.repo}#${p.number}`),
@@ -106,6 +120,14 @@ export async function pollOnce(): Promise<PollResult> {
         if (!isCi && isOwnAuthor(group.rootAuthor)) continue;
         if (fb.resolvedThreadKeys.has(group.threadKey)) continue;
 
+        // Ignored authors (e.g. tubi-laborador, github-actions): never triage —
+        // resolve directly, no Verdict. CI is exempt (its synthetic author is
+        // classed separately via the CI pipeline).
+        if (!isCi && isIgnoredAuthor(group.rootAuthor)) {
+          resolveIgnoredAuthor(prKey, pr, group);
+          continue;
+        }
+
         const id = upsertThread(prKey, pr, group, cfg.maxThreadAttempts);
         if (id) newThreads.push(id);
       }
@@ -120,6 +142,11 @@ export async function pollOnce(): Promise<PollResult> {
       for (const threadKey of fb.resolvedThreadKeys) {
         reconcileResolved(prKey, threadKey);
       }
+
+      // A branch push can't re-open a waiting Thread (blocked stays frozen), but
+      // the owner may have landed the fix by hand. Annotate any waiting Thread
+      // with the commits pushed since it stalled so that's visible under Feedback.
+      await annotateBranchAdvances(pr.owner, pr.repo, prKey, head.headSha);
     } catch (err: any) {
       logEvent(null, "poll_error", `${prKey}: ${err?.message ?? err}`);
     }
@@ -149,6 +176,72 @@ function reconcileResolved(prKey: string, threadKey: string): void {
   updateThread(existing.id, { status: "resolved", error: null, proposal: null });
   cleanupCiLog(existing.id);
   logEvent(existing.id, "reconciled_resolved", `${threadKey} resolved on GitHub out-of-band`);
+  emit({ type: "thread_updated", threadId: existing.id });
+}
+
+/**
+ * For each WAITING Thread on this PR (`blocked` / `awaiting_approval` / `error`),
+ * detect commits pushed to the branch after the Thread stalled and record them as
+ * a "branch advanced" annotation. It never changes the Thread's status — a push
+ * doesn't re-open a frozen Thread; it only surfaces that a fix may have landed so
+ * the owner can resolve it. The base is snapshotted the first poll a Thread is
+ * seen waiting (no commits shown until the head actually moves past it); the
+ * annotation is cleared by `updateThread` the moment the Thread is re-worked.
+ */
+async function annotateBranchAdvances(
+  owner: string,
+  repo: string,
+  prKey: string,
+  currentHead: string
+): Promise<void> {
+  if (!currentHead) return;
+  const waiting = listWaitingThreads(prKey);
+  if (!waiting.length) return;
+
+  for (const t of waiting) {
+    const prev: { base?: string } = t.newCommitsJson ? JSON.parse(t.newCommitsJson) : {};
+    // First sighting in a waiting state → snapshot the base; nothing to show yet.
+    if (!prev.base) {
+      updateThread(t.id, { newCommits: { base: currentHead, head: currentHead, commits: [] } });
+      continue;
+    }
+    if (prev.base === currentHead) continue; // branch hasn't moved
+    try {
+      const commits = await compareCommits(owner, repo, prev.base, currentHead);
+      updateThread(t.id, { newCommits: { base: prev.base, head: currentHead, commits } });
+      if (commits.length) {
+        logEvent(
+          t.id,
+          "branch_advanced",
+          `${commits.length} commit(s) pushed since this thread stalled (${prev.base.slice(0, 7)}->${currentHead.slice(0, 7)})`
+        );
+        emit({ type: "thread_updated", threadId: t.id });
+      }
+    } catch (err: any) {
+      logEvent(t.id, "poll_error", `branch-advance check: ${err?.message ?? err}`);
+    }
+  }
+}
+
+/**
+ * Handle a thread group whose root author is on `ignoreAuthors`: it is never
+ * triaged. We still record its feedback (so it isn't re-seen as "new activity"
+ * later) and, if a Thread already exists for it, resolve that Thread directly —
+ * dropping any parked proposal. No Verdict, no notification. Idempotent: a group
+ * with no pre-existing Thread just gets its items recorded.
+ */
+function resolveIgnoredAuthor(
+  prKey: string,
+  pr: { owner: string; repo: string; number: number },
+  group: ThreadGroup
+): void {
+  const reviewId = reviewIdOf(group.threadKey);
+  for (const it of group.items) recordFeedback(prKey, it, reviewId);
+  const existing = getThreadByKey(prKey, group.threadKey);
+  if (!existing || existing.status === "resolved") return;
+  updateThread(existing.id, { status: "resolved", error: null, proposal: null });
+  cleanupCiLog(existing.id);
+  logEvent(existing.id, "skipped_author", `${group.rootAuthor} on ignoreAuthors; resolved without verdict`);
   emit({ type: "thread_updated", threadId: existing.id });
 }
 

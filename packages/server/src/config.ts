@@ -31,6 +31,12 @@ export interface Config {
   /** Max times the fix agent re-runs to repair gate (lint/typecheck) errors it introduced, per fix. */
   maxGateFixAttempts: number;
   botLogins: string[];
+  /**
+   * Authors whose feedback is ignored entirely: no Verdict is run — the Thread is
+   * marked resolved directly. Matches case-insensitively, tolerant of a trailing
+   * "[bot]" suffix (so `github-actions` catches `github-actions[bot]`).
+   */
+  ignoreAuthors: string[];
   /** Repos to ignore entirely. Entry with "/" matches owner/repo exactly; otherwise matches repo name (any owner). */
   ignoreRepos: string[];
   /** If non-empty, ONLY these repos are processed (allow-list). Same matching as ignoreRepos. */
@@ -83,6 +89,7 @@ const DEFAULTS: Config = {
     "codex-connector[bot]",
     "github-actions[bot]",
   ],
+  ignoreAuthors: ["tubi-laborador", "github-actions"],
   ignoreRepos: [],
   // Hard-scope the whole pipeline to the one repo whose build/lint env we know.
   allowRepos: ["adRise/www"],
@@ -107,9 +114,10 @@ const DEFAULTS: Config = {
   },
   overview: {
     enabled: true,
-    // A PR-wide investigation (whole diff + downstream trace) is comparably broad
-    // to a CI-log triage, so it gets the same generous budget.
-    maxTurns: 60,
+    // A PR-wide investigation PLUS authoring up to three Excalidraw canvases,
+    // each through a write→render→view→fix loop (2–4 iterations). That loop is
+    // turn-hungry, so the budget is well above the old prose-only 60.
+    maxTurns: 150,
   },
 };
 

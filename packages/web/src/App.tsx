@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  App as AntApp,
   Badge,
   Button,
   Collapse,
@@ -19,6 +20,7 @@ import { StatusTag } from "./status";
 import { RelativeTime } from "./RelativeTime";
 import { TaskQueue } from "./TaskQueue";
 import { OverviewPanel } from "./OverviewPanel";
+import { VscodeLink } from "./prLinks";
 
 const { Sider, Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -68,15 +70,36 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  const { notification } = AntApp.useApp();
+
   const onEvent = useCallback(
     (ev: Parameters<Parameters<typeof useEventStream>[0]>[0]) => {
-      if (ev?.type === "pr_overview_updated") {
+      // Overview AND quiz progress both re-fetch the OverviewPanel (the quiz
+      // lives inside it) but leave the PR/thread tree untouched.
+      if (ev?.type === "pr_overview_updated" || ev?.type === "pr_quiz_updated") {
         setOverviewTicks((t) => ({ ...t, [ev.prKey]: (t[ev.prKey] ?? 0) + 1 }));
-        return; // overview progress doesn't change the PR/thread tree
+        return;
+      }
+      // A `notification` carries the exact reason a thread needs the owner (e.g. an
+      // approve/push that couldn't complete). Surface it as a clickable toast that
+      // deep-links to the thread — previously these were silently dropped, so a
+      // failed push looked like nothing happened.
+      if (ev?.type === "notification") {
+        notification.warning({
+          message: ev.prKey,
+          description: ev.message,
+          duration: 0, // stay until dismissed — it's an action item
+          onClick: () => {
+            location.hash = `#/thread/${ev.threadId}`;
+          },
+          style: { cursor: "pointer" },
+        });
+        reload();
+        return;
       }
       reload();
     },
-    [reload]
+    [reload, notification]
   );
 
   useEventStream(onEvent);
@@ -174,21 +197,56 @@ export function App() {
               style={{ marginTop: 48 }}
             />
           ) : (
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              {prs.map((pr) => (
-                <PrNode
-                  key={pr.prKey}
-                  pr={pr}
-                  selected={selected}
-                  selectedPr={selectedPr}
-                  onSelect={select}
-                  onSelectPr={selectPr}
-                  defaultOpen={
-                    (pr.role === "author" && pr.status !== "resolved") ||
-                    pr.prKey === linkedPr
-                  }
-                />
-              ))}
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              {(
+                [
+                  { role: "author", label: "Authored by me", expired: false },
+                  { role: "reviewer", label: "Requested my review", expired: false },
+                  // Merged/closed PRs, retained as read-only history. Grouped
+                  // together regardless of role so they stay out of the way.
+                  { role: null, label: "Expired (merged/closed)", expired: true },
+                ] as const
+              ).map(({ role, label, expired }) => {
+                const group = prs.filter((p) =>
+                  expired ? !!p.expiredAt : !p.expiredAt && p.role === role
+                );
+                if (!group.length) return null;
+                return (
+                  <div key={label}>
+                    <Text
+                      type="secondary"
+                      strong
+                      style={{
+                        fontSize: 11,
+                        textTransform: "uppercase",
+                        letterSpacing: 0.5,
+                        display: "block",
+                        marginBottom: 8,
+                        paddingInline: 2,
+                      }}
+                    >
+                      {label} ({group.length})
+                    </Text>
+                    <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                      {group.map((pr) => (
+                        <PrNode
+                          key={pr.prKey}
+                          pr={pr}
+                          selected={selected}
+                          selectedPr={selectedPr}
+                          onSelect={select}
+                          onSelectPr={selectPr}
+                          defaultOpen={
+                            !expired &&
+                            ((pr.role === "author" && pr.status !== "resolved") ||
+                              pr.prKey === linkedPr)
+                          }
+                        />
+                      ))}
+                    </Space>
+                  </div>
+                );
+              })}
             </Space>
           )}
         </div>
@@ -303,8 +361,22 @@ function PrNode({
                   >
                     <GithubOutlined />
                   </a>
+                  <VscodeLink
+                    githubUrl={pr.url}
+                    onClick={(e) => e.stopPropagation()}
+                  />
                 </Space>
-                {pr.role === "reviewer" ? (
+                {pr.expiredAt ? (
+                  <Tooltip
+                    title={
+                      <>
+                        Merged/closed — <RelativeTime at={pr.expiredAt} prefix="expired" />
+                      </>
+                    }
+                  >
+                    <Tag style={{ marginInlineEnd: 0 }}>EXPIRED</Tag>
+                  </Tooltip>
+                ) : pr.role === "reviewer" ? (
                   <Tag color="purple" style={{ marginInlineEnd: 0 }}>
                     REVIEW
                   </Tag>

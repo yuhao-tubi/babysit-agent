@@ -4,8 +4,12 @@ import { dirname } from "node:path";
 import { loadConfig } from "./config.js";
 import type {
   AuthorClass,
+  BranchAdvance,
+  DiagramSet,
   FeedbackItem,
   Proposal,
+  QuizQuestion,
+  RiskItem,
   ThreadRow,
   ThreadStatus,
   Verdict,
@@ -114,6 +118,10 @@ function migrate(d: Database.Database): void {
   if (!cols.some((c) => c.name === "proposal_json")) {
     d.exec("ALTER TABLE threads ADD COLUMN proposal_json TEXT");
   }
+  // Commits that landed on the branch while the Thread was waiting (BranchAdvance).
+  if (!cols.some((c) => c.name === "new_commits_json")) {
+    d.exec("ALTER TABLE threads ADD COLUMN new_commits_json TEXT");
+  }
 
   // Additive columns on `prs` for the PR-level overview + diagram artifact
   // (a Session-level artifact that lives OUTSIDE the Thread/Verdict lifecycle).
@@ -128,12 +136,42 @@ function migrate(d: Database.Database): void {
   };
   addPrCol("overview_md", "TEXT");
   addPrCol("diagram_path", "TEXT");
+  // `diagrams_json` holds the 4W1H diagram set. It now stores a MAP of raw
+  // Excalidraw docs keyed by section ({why?,what?,how?}) — authored by the agent
+  // and rendered/edited client-side via @excalidraw/excalidraw. (Superseded the
+  // React-Flow DiagramSpec[] payload; the column is reused, the shape changed.)
+  addPrCol("diagrams_json", "TEXT");
   addPrCol("overview_head_sha", "TEXT");
   addPrCol("overview_status", "TEXT");
   addPrCol("overview_generated_at", "TEXT");
+  // Set when the OWNER hand-edits + Saves a canvas from the dashboard. Gates the
+  // "Regenerate discards your manual edits" warning and suppresses the head-SHA
+  // staleness nag once the owner has taken ownership of the artifact.
+  addPrCol("diagrams_edited_at", "TEXT");
   // Discovery role: "author" (you wrote it — full pipeline) or "reviewer"
   // (you're a requested reviewer — OVERVIEW-ONLY, never enters verdict/gate/push).
   addPrCol("role", "TEXT NOT NULL DEFAULT 'author'");
+  // Verified Risk Analysis (reviewer-role PRs only) — produced by the SAME
+  // Generate run as the overview (finder→confirmer passes in the shared
+  // worktree), but persisted as its OWN artifact. `risks_json` is the merged,
+  // display-ready RiskItem[]; `risks_status` ∈ ready|failed (independent of the
+  // overview's status — a failed risk stage never blanks a ready overview). It
+  // shares the overview's head-sha / generated-at / generating machinery.
+  addPrCol("risks_json", "TEXT");
+  addPrCol("risks_status", "TEXT");
+  // PR-comprehension QUIZ (a Session-level artifact like the overview/risks). Its
+  // own on-demand agent run; `quiz_json` is the QuizQuestion[], `quiz_status` ∈
+  // generating|ready|failed, and `quiz_head_sha` is the head it was built against
+  // (auto-invalidated when it differs from the live head — see the API's stale
+  // gating). Answers are ephemeral (browser-only), so nothing else is persisted.
+  addPrCol("quiz_json", "TEXT");
+  addPrCol("quiz_status", "TEXT");
+  addPrCol("quiz_head_sha", "TEXT");
+  // Set when a PR falls out of the live open set (merged/closed since last poll).
+  // Expired PRs (and their threads) are RETAINED, not deleted — surfaced in a
+  // separate "Expired" section of the dashboard and skipped by the pipeline.
+  // Cleared (set NULL) again if the PR ever comes back into the open set.
+  addPrCol("expired_at", "TEXT");
 }
 
 function now(): string {
@@ -190,48 +228,54 @@ export function upsertPr(p: {
 }): void {
   getDb()
     .prepare(
-      `INSERT INTO prs (pr_key, owner, repo, number, title, url, head_ref, head_sha, role, last_polled)
-       VALUES (@prKey,@owner,@repo,@number,@title,@url,@headRef,@headSha,@role,@lastPolled)
+      `INSERT INTO prs (pr_key, owner, repo, number, title, url, head_ref, head_sha, role, last_polled, expired_at)
+       VALUES (@prKey,@owner,@repo,@number,@title,@url,@headRef,@headSha,@role,@lastPolled,NULL)
        ON CONFLICT(pr_key) DO UPDATE SET
-         title=@title, url=@url, head_ref=@headRef, head_sha=@headSha, role=@role, last_polled=@lastPolled`
+         title=@title, url=@url, head_ref=@headRef, head_sha=@headSha, role=@role,
+         last_polled=@lastPolled, expired_at=NULL`
     )
     .run({ headSha: null, role: "author", ...p, lastPolled: now() });
 }
 
 /**
- * Drop every stored PR (and its threads/items/feedback/events) that is no longer
- * in the live open-PR set — i.e. it merged or closed since we last saw it. We
- * only ever observe open PRs (decision: the watch list tracks open PRs only), so
- * a PR that falls out of the authored-open search is removed wholesale. Returns
- * the pr_keys pruned. No-op when `openPrKeys` is empty (treated as "unknown" to
- * avoid wiping the list on a failed/empty poll).
+ * Mark every stored PR that is no longer in the live open-PR set as EXPIRED —
+ * i.e. it merged or closed since we last saw it. We only ever observe open PRs
+ * (decision: the watch list tracks open PRs only), so a PR that falls out of the
+ * authored-open search has ended. Rather than delete it wholesale, we RETAIN the
+ * PR (and its threads/feedback/events) with an `expired_at` stamp so the owner
+ * can still see its history in the dashboard's "Expired" section; the pipeline
+ * skips expired PRs. Idempotent — a PR already expired keeps its original stamp.
+ * Returns the pr_keys newly expired. No-op when `openPrKeys` is empty (treated as
+ * "unknown" to avoid wiping the list on a failed/empty poll).
  */
 export function pruneClosedPrs(openPrKeys: string[]): string[] {
   if (openPrKeys.length === 0) return [];
   const db = getDb();
   const placeholders = openPrKeys.map(() => "?").join(",");
   const stale = db
-    .prepare(`SELECT pr_key FROM prs WHERE pr_key NOT IN (${placeholders})`)
+    .prepare(
+      `SELECT pr_key FROM prs WHERE expired_at IS NULL AND pr_key NOT IN (${placeholders})`
+    )
     .all(...openPrKeys) as { pr_key: string }[];
   if (stale.length === 0) return [];
 
   const keys = stale.map((r) => r.pr_key);
-  const prune = db.transaction((prKeys: string[]) => {
+  const ts = now();
+  const expire = db.transaction((prKeys: string[]) => {
     for (const prKey of prKeys) {
-      const threadIds = (
-        db.prepare("SELECT id FROM threads WHERE pr_key=?").all(prKey) as { id: number }[]
-      ).map((r) => r.id);
-      for (const tid of threadIds) {
-        db.prepare("DELETE FROM thread_items WHERE thread_id=?").run(tid);
-        db.prepare("DELETE FROM events WHERE thread_id=?").run(tid);
-      }
-      db.prepare("DELETE FROM threads WHERE pr_key=?").run(prKey);
-      db.prepare("DELETE FROM feedback WHERE pr_key=?").run(prKey);
-      db.prepare("DELETE FROM prs WHERE pr_key=?").run(prKey);
+      db.prepare("UPDATE prs SET expired_at=? WHERE pr_key=?").run(ts, prKey);
     }
   });
-  prune(keys);
+  expire(keys);
   return keys;
+}
+
+/** True when a PR has fallen out of the live open set (merged/closed). */
+export function isPrExpired(prKey: string): boolean {
+  const row = getDb()
+    .prepare("SELECT expired_at FROM prs WHERE pr_key=?")
+    .get(prKey) as { expired_at: string | null } | undefined;
+  return !!row?.expired_at;
 }
 
 // ---- threads ----
@@ -289,6 +333,7 @@ export function updateThread(
     proposal: Proposal | null;
     error: string | null;
     attemptCount: number;
+    newCommits: BranchAdvance | null;
   }>
 ): void {
   const sets: string[] = [];
@@ -296,6 +341,18 @@ export function updateThread(
   if (fields.status !== undefined) {
     sets.push("status=@status");
     params.status = fields.status;
+    // Re-worked or resolved → the "branch advanced" marker is stale; drop it.
+    // (A Thread that lands back in a waiting state gets a fresh base snapshotted
+    // by the poller.) Skipped when the caller sets newCommits explicitly below.
+    if (
+      fields.newCommits === undefined &&
+      (fields.status === "pending" ||
+        fields.status === "in_progress" ||
+        fields.status === "resolved")
+    ) {
+      sets.push("new_commits_json=@new_commits_json");
+      params.new_commits_json = null;
+    }
   }
   if (fields.verdict !== undefined) {
     sets.push("verdict_json=@verdict_json");
@@ -321,6 +378,11 @@ export function updateThread(
     sets.push("attempt_count=@attempt_count");
     params.attempt_count = fields.attemptCount;
   }
+  if (fields.newCommits !== undefined) {
+    sets.push("new_commits_json=@new_commits_json");
+    params.new_commits_json =
+      fields.newCommits === null ? null : JSON.stringify(fields.newCommits);
+  }
   sets.push("updated_at=@updated_at");
   getDb()
     .prepare(`UPDATE threads SET ${sets.join(", ")} WHERE id=@id`)
@@ -342,6 +404,7 @@ function rowToThread(r: any): ThreadRow {
     replyDraft: r.reply_draft,
     diff: r.diff,
     proposalJson: r.proposal_json ?? null,
+    newCommitsJson: r.new_commits_json ?? null,
     attemptCount: r.attempt_count,
     error: r.error,
     createdAt: r.created_at,
@@ -363,6 +426,21 @@ export function listThreads(status?: ThreadStatus): ThreadRow[] {
         .prepare("SELECT * FROM threads ORDER BY updated_at DESC")
         .all();
   return rows.map(rowToThread);
+}
+
+/**
+ * Threads for a PR that sit in a WAITING state (`blocked` / `awaiting_approval`
+ * / `error`) — the ones a branch push can't re-open, so the poller annotates
+ * them with any new commits instead.
+ */
+export function listWaitingThreads(prKey: string): ThreadRow[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM threads
+       WHERE pr_key=? AND status IN ('blocked','awaiting_approval','error')`
+    )
+    .all(prKey)
+    .map(rowToThread);
 }
 
 export function getThreadItems(id: number): FeedbackItem[] {
@@ -409,6 +487,8 @@ export interface PrRow {
   url: string;
   role: PrRole;
   lastPolled: string | null;
+  /** Set when the PR left the live open set (merged/closed); null while open. */
+  expiredAt: string | null;
 }
 
 function rowToPrRow(r: any): PrRow {
@@ -421,16 +501,21 @@ function rowToPrRow(r: any): PrRow {
     url: r.url,
     role: (r.role as PrRole) ?? "author",
     lastPolled: r.last_polled,
+    expiredAt: r.expired_at ?? null,
   };
 }
 
-/** PRs that currently have at least one thread-unit, newest activity first. */
+/**
+ * Still-open PRs that currently have at least one thread-unit, newest activity
+ * first. Expired PRs are excluded here — see `listExpiredPrs`.
+ */
 export function listPrsWithThreads(): PrRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT p.pr_key, p.owner, p.repo, p.number, p.title, p.url, p.role, p.last_polled
+      `SELECT p.pr_key, p.owner, p.repo, p.number, p.title, p.url, p.role, p.last_polled, p.expired_at
        FROM prs p
-       WHERE EXISTS (SELECT 1 FROM threads t WHERE t.pr_key = p.pr_key)
+       WHERE p.expired_at IS NULL
+         AND EXISTS (SELECT 1 FROM threads t WHERE t.pr_key = p.pr_key)
        ORDER BY p.last_polled DESC`
     )
     .all();
@@ -440,12 +525,28 @@ export function listPrsWithThreads(): PrRow[] {
 /**
  * Reviewer-role PRs (you're a requested reviewer). These are OVERVIEW-ONLY and
  * have no Threads, so they are listed by role rather than by thread existence.
+ * Expired PRs are excluded — see `listExpiredPrs`.
  */
 export function listReviewerPrs(): PrRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT pr_key, owner, repo, number, title, url, role, last_polled
-       FROM prs WHERE role='reviewer' ORDER BY last_polled DESC`
+      `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
+       FROM prs WHERE role='reviewer' AND expired_at IS NULL ORDER BY last_polled DESC`
+    )
+    .all();
+  return rows.map(rowToPrRow);
+}
+
+/**
+ * Expired PRs (merged/closed since last seen), most-recently expired first.
+ * Retained so the owner can still view their history in the dashboard's
+ * "Expired" section; both authored and reviewer roles are included.
+ */
+export function listExpiredPrs(): PrRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
+       FROM prs WHERE expired_at IS NOT NULL ORDER BY expired_at DESC`
     )
     .all();
   return rows.map(rowToPrRow);
@@ -454,6 +555,53 @@ export function listReviewerPrs(): PrRow[] {
 // ---- PR-level overview + diagram artifact (a Session-level artifact) ----
 
 export type OverviewStatus = "idle" | "generating" | "ready" | "failed";
+export type RiskStatus = "ready" | "failed";
+export type QuizStatus = "generating" | "ready" | "failed";
+
+/** Parse the stored quiz JSON into a QuizQuestion[], dropping malformed entries. */
+function parseQuiz(json: unknown): QuizQuestion[] {
+  if (typeof json !== "string" || !json.trim()) return [];
+  let arr: unknown;
+  try {
+    arr = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: QuizQuestion[] = [];
+  for (const e of arr) {
+    if (!e || typeof e !== "object") continue;
+    const o = e as any;
+    if (
+      typeof o.question !== "string" || !o.question.trim() ||
+      !Array.isArray(o.options) || o.options.length < 2 ||
+      !o.options.every((x: unknown) => typeof x === "string") ||
+      typeof o.correctIndex !== "number" ||
+      o.correctIndex < 0 || o.correctIndex >= o.options.length ||
+      typeof o.explanation !== "string"
+    ) {
+      continue;
+    }
+    out.push({
+      question: o.question,
+      options: o.options,
+      correctIndex: o.correctIndex,
+      explanation: o.explanation,
+    });
+  }
+  return out;
+}
+
+/** Parse the stored risks JSON into a RiskItem[], tolerating null/corrupt values. */
+function parseRisks(json: unknown): RiskItem[] {
+  if (typeof json !== "string" || !json.trim()) return [];
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? (arr as RiskItem[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 export interface PrOverview {
   prKey: string;
@@ -466,14 +614,42 @@ export interface PrOverview {
   role: PrRole;
   /** Current head sha from the last poll (staleness = differs from overviewHeadSha). */
   headSha: string | null;
-  /** The 4-part overview markdown, or null if never generated. */
+  /** The 4W1H overview markdown, or null if never generated. */
   overviewMd: string | null;
-  /** Absolute path to the saved SVG diagram, or null if none/failed. */
-  diagramPath: string | null;
+  /** The 4W1H diagram set — Excalidraw canvases keyed by section ({} if none). */
+  diagrams: DiagramSet;
   /** Head sha the artifact was built against (staleness signal). */
   overviewHeadSha: string | null;
   overviewStatus: OverviewStatus;
   overviewGeneratedAt: string | null;
+  /** When the owner last hand-edited+saved a canvas (null = never). */
+  diagramsEditedAt: string | null;
+  /** Verified risk analysis (reviewer PRs) — merged RiskItem[] ([] if none/failed). */
+  risks: RiskItem[];
+  /** `ready` | `failed` | null (never run). Independent of overviewStatus. */
+  risksStatus: RiskStatus | null;
+  /** PR-comprehension quiz — QuizQuestion[] ([] if never generated/failed). */
+  quiz: QuizQuestion[];
+  /** `generating` | `ready` | `failed` | null (never run). Independent of overview. */
+  quizStatus: QuizStatus | null;
+  /** Head sha the quiz was built against (staleness = differs from headSha). */
+  quizHeadSha: string | null;
+}
+
+/**
+ * Parse the stored diagram JSON into a section→ExcalidrawDoc map, tolerating
+ * null/corrupt values AND the legacy React-Flow `DiagramSpec[]` payload (which
+ * we simply drop — an array is not the new map shape).
+ */
+function parseDiagrams(json: unknown): DiagramSet {
+  if (typeof json !== "string" || !json.trim()) return {};
+  try {
+    const obj = JSON.parse(json);
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+    return obj as DiagramSet;
+  } catch {
+    return {};
+  }
 }
 
 function rowToOverview(r: any): PrOverview {
@@ -488,10 +664,16 @@ function rowToOverview(r: any): PrOverview {
     role: (r.role as PrRole) ?? "author",
     headSha: r.head_sha ?? null,
     overviewMd: r.overview_md ?? null,
-    diagramPath: r.diagram_path ?? null,
+    diagrams: parseDiagrams(r.diagrams_json),
     overviewHeadSha: r.overview_head_sha ?? null,
     overviewStatus: (r.overview_status as OverviewStatus) ?? "idle",
     overviewGeneratedAt: r.overview_generated_at ?? null,
+    diagramsEditedAt: r.diagrams_edited_at ?? null,
+    risks: parseRisks(r.risks_json),
+    risksStatus: (r.risks_status as RiskStatus) ?? null,
+    quiz: parseQuiz(r.quiz_json),
+    quizStatus: (r.quiz_status as QuizStatus) ?? null,
+    quizHeadSha: r.quiz_head_sha ?? null,
   };
 }
 
@@ -506,25 +688,43 @@ export function updatePrOverview(
   prKey: string,
   fields: Partial<{
     overviewMd: string | null;
-    diagramPath: string | null;
+    diagrams: DiagramSet | null;
     overviewHeadSha: string | null;
     overviewStatus: OverviewStatus;
     overviewGeneratedAt: string | null;
+    diagramsEditedAt: string | null;
+    risks: RiskItem[] | null;
+    risksStatus: RiskStatus | null;
+    quiz: QuizQuestion[] | null;
+    quizStatus: QuizStatus | null;
+    quizHeadSha: string | null;
   }>
 ): void {
   const map: Record<string, string> = {
     overviewMd: "overview_md",
-    diagramPath: "diagram_path",
+    diagrams: "diagrams_json",
     overviewHeadSha: "overview_head_sha",
     overviewStatus: "overview_status",
     overviewGeneratedAt: "overview_generated_at",
+    diagramsEditedAt: "diagrams_edited_at",
+    risks: "risks_json",
+    risksStatus: "risks_status",
+    quiz: "quiz_json",
+    quizStatus: "quiz_status",
+    quizHeadSha: "quiz_head_sha",
   };
+  // Columns whose value is a JSON-serialized structure (everything else scalar).
+  const jsonCols = new Set(["diagrams", "risks", "quiz"]);
   const sets: string[] = [];
   const params: Record<string, unknown> = { pr_key: prKey };
   for (const [k, col] of Object.entries(map)) {
     if ((fields as any)[k] !== undefined) {
       sets.push(`${col}=@${col}`);
-      params[col] = (fields as any)[k];
+      params[col] = jsonCols.has(k)
+        ? (fields as any)[k] == null
+          ? null
+          : JSON.stringify((fields as any)[k])
+        : (fields as any)[k];
     }
   }
   if (!sets.length) return;
@@ -545,6 +745,21 @@ export function failStuckOverviews(): string[] {
     .all() as { pr_key: string }[];
   if (!stuck.length) return [];
   db.prepare("UPDATE prs SET overview_status='failed' WHERE overview_status='generating'").run();
+  return stuck.map((r) => r.pr_key);
+}
+
+/**
+ * Startup sweep for the quiz artifact — same reasoning as `failStuckOverviews`:
+ * a quiz left `generating` by a crash owes GitHub nothing, so it is reset to
+ * `failed` (re-clickable) rather than resumed. Returns the pr_keys reset.
+ */
+export function failStuckQuizzes(): string[] {
+  const db = getDb();
+  const stuck = db
+    .prepare("SELECT pr_key FROM prs WHERE quiz_status='generating'")
+    .all() as { pr_key: string }[];
+  if (!stuck.length) return [];
+  db.prepare("UPDATE prs SET quiz_status='failed' WHERE quiz_status='generating'").run();
   return stuck.map((r) => r.pr_key);
 }
 
