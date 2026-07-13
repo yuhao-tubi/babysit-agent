@@ -1,3 +1,4 @@
+import { platform } from "node:os";
 import notifier from "node-notifier";
 import { loadConfig } from "./config.js";
 import { emit } from "./events.js";
@@ -5,6 +6,13 @@ import { logEvent, listThreads } from "./db.js";
 
 // De-dupe banners per PR: one PR may escalate several threads in a cycle.
 const notifiedPrs = new Set<string>();
+
+// Native macOS banners only work on a Mac host. In a Linux container (the
+// Docker distribution) there is no notification bus, so node-notifier would
+// error trying to shell out. Degrade to log-only there — the dashboard's SSE
+// `notification` event (emitted above, always) remains the escalation surface.
+const bannersSupported =
+  platform() === "darwin" && process.env.BABYSIT_DISABLE_BANNERS !== "1";
 
 /**
  * Fire a clickable macOS notification for an escalated thread, coalesced per PR.
@@ -16,6 +24,10 @@ export function notifyEscalation(threadId: number, prKey: string, message: strin
   logEvent(threadId, "notification", message);
   if (notifiedPrs.has(prKey)) return;
   notifiedPrs.add(prKey);
+
+  // Off a Mac host (e.g. the container), the SSE event above is the whole
+  // story — skip the native banner rather than let node-notifier throw.
+  if (!bannersSupported) return;
 
   const cfg = loadConfig();
   const url = `http://localhost:${cfg.port}/#/pr/${encodeURIComponent(prKey)}`;

@@ -127,6 +127,40 @@ clean: down ## Stop services and remove runtime/build artifacts
 	@echo "Removed $(RUN_DIR)/ and $(LOG_DIR)/"
 
 # ---------------------------------------------------------------------------
+# Docker (self-contained image; ./ is bind-mounted to /data)
+# ---------------------------------------------------------------------------
+
+DOCKER_IMAGE := babysit-agent:latest
+# Own files written into ./data as the invoking host user.
+PUID := $(shell id -u)
+PGID := $(shell id -g)
+
+.PHONY: docker-build
+docker-build: ## Build the self-contained agent image
+	docker build -t $(DOCKER_IMAGE) .
+
+.PHONY: docker-setup
+docker-setup: ## Run the interactive setup wizard (writes ./.env + ./config.json)
+	docker run -it --rm -v "$(CURDIR)":/data -e PUID=$(PUID) -e PGID=$(PGID) $(DOCKER_IMAGE) setup
+
+.PHONY: docker-doctor
+docker-doctor: ## Validate creds + config non-interactively
+	docker run --rm -v "$(CURDIR)":/data -e PUID=$(PUID) -e PGID=$(PGID) $(DOCKER_IMAGE) doctor
+
+.PHONY: docker-up
+docker-up: ## Start the daemon in the background (docker compose)
+	PUID=$(PUID) PGID=$(PGID) docker compose up -d
+	@echo "Dashboard: http://localhost:$(SERVER_PORT)"
+
+.PHONY: docker-down
+docker-down: ## Stop the daemon
+	docker compose down
+
+.PHONY: docker-logs
+docker-logs: ## Tail the daemon logs
+	docker compose logs -f
+
+# ---------------------------------------------------------------------------
 # launchd (installed daemon — runs `npm run dev:server` at login, KeepAlive)
 # ---------------------------------------------------------------------------
 

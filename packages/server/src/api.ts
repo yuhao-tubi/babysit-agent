@@ -375,5 +375,9 @@ export async function startServer(port: number): Promise<void> {
     });
   }
 
-  await app.listen({ port, host: "127.0.0.1" });
+  // Bind loopback by default (safe for a native local daemon). In a container
+  // the published port can only reach a 0.0.0.0 bind, so BABYSIT_HOST=0.0.0.0
+  // is set in the image (see Dockerfile).
+  const host = process.env.BABYSIT_HOST || "127.0.0.1";
+  await app.listen({ port, host });
 }

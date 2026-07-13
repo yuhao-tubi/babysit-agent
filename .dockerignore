@@ -1,0 +1,23 @@
+# Never ship host build/runtime state into the image.
+# node_modules especially: better-sqlite3 is a native module built for the
+# host (darwin); it must be rebuilt for Linux inside the image via `npm ci`.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+# Local runtime state + secrets (these live in the bind-mounted /data instead).
+data/
+.env
+config.json
+.run/
+*.log
+
+# Editor / VCS / CI cruft not needed at build time.
+.git
+.gitignore
+.DS_Store
+.claude/worktrees
+
+# Renderer output + generated assets regenerated at runtime.
+packages/server/overview/
+docs/*.png

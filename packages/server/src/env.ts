@@ -11,5 +11,8 @@ import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // env.ts lives at packages/server/src/env.ts → workspace root is three up.
+// Containerized runs bind-mount the .env into a data dir and point
+// BABYSIT_ENV_FILE at it; otherwise fall back to the workspace-root .env.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-loadDotenv({ path: join(root, ".env") });
+const envPath = process.env.BABYSIT_ENV_FILE || join(root, ".env");
+loadDotenv({ path: envPath });

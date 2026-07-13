@@ -1,0 +1,28 @@
+# Run the PR Babysitting Agent as a persistent daemon.
+#
+# The current folder is the single source of truth: creds + config sit at the
+# mount root (./.env, ./config.json) and heavy state (db, repo clones,
+# worktrees) under ./data/. Run `make docker-setup` once to populate them, then
+# `docker compose up -d`.
+services:
+  babysit-agent:
+    build: .
+    image: babysit-agent:latest
+    container_name: babysit-agent
+    command: run
+    restart: unless-stopped
+    ports:
+      - "4317:4317" # dashboard + API
+    volumes:
+      # $PWD -> /data : .env, config.json, and ./data/ all persist on the host.
+      - ./:/data
+    environment:
+      # Own the files written into ./data as your host user (avoids root-owned
+      # files). Override on the CLI: `PUID=$(id -u) PGID=$(id -g) docker compose up`.
+      - PUID=${PUID:-}
+      - PGID=${PGID:-}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"

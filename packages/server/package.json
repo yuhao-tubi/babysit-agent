@@ -9,6 +9,8 @@
     "build": "tsc -p tsconfig.json && npm run copy-assets",
     "copy-assets": "cp -R src/overview-assets dist/overview-assets",
     "start": "node dist/index.js",
+    "setup": "node dist/setup.js setup",
+    "doctor": "node dist/setup.js doctor",
     "test": "tsx --test src/**/*.test.ts",
     "poll-once": "tsx src/cli.ts poll-once",
     "list-prs": "tsx src/cli.ts list-prs"

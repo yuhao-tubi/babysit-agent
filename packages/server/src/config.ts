@@ -148,6 +148,18 @@ export function loadConfig(): Config {
   // Shallow spread would let a partial `ci` block drop the defaults — merge it.
   merged.ci = { ...DEFAULTS.ci, ...(fileCfg.ci ?? {}) };
   merged.overview = { ...DEFAULTS.overview, ...(fileCfg.overview ?? {}) };
+
+  // Containerized runs bind-mount a single data dir (see Dockerfile). When
+  // BABYSIT_DATA_DIR is set, root the heavy runtime state (db + clones +
+  // worktrees) under it — but only for paths config.json did NOT set
+  // explicitly, so an operator override in config.json still wins.
+  const dataDir = process.env.BABYSIT_DATA_DIR;
+  if (dataDir) {
+    if (fileCfg.reposRoot == null) merged.reposRoot = join(dataDir, "repos");
+    if (fileCfg.worktreesRoot == null) merged.worktreesRoot = join(dataDir, "worktrees");
+    if (fileCfg.dbPath == null) merged.dbPath = join(dataDir, "state.db");
+  }
+
   merged.reposRoot = expandHome(merged.reposRoot);
   merged.worktreesRoot = expandHome(merged.worktreesRoot);
   merged.dbPath = expandHome(merged.dbPath);
