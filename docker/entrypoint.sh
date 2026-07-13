@@ -24,9 +24,11 @@ run_as() {
     local uid="${PUID:-0}" gid="${PGID:-0}"
     groupmod -o -g "$gid" node >/dev/null 2>&1 || groupadd -o -g "$gid" appgrp >/dev/null 2>&1 || true
     usermod  -o -u "$uid" node >/dev/null 2>&1 || true
-    export HOME=/home/appuser
-    mkdir -p "$HOME"
-    chown -R "$uid:$gid" "$HOME" 2>/dev/null || true
+    # `node`'s home from the image; gosu resets HOME to the target user's passwd
+    # entry, so we can't override it here — inner() sets HOME explicitly instead.
+    # Make sure that home is owned by the remapped uid so gh/git can write there.
+    mkdir -p /home/node
+    chown -R "$uid:$gid" /home/node 2>/dev/null || true
     # Only chown the mount if we own the process — cheap for small trees, the
     # repo clones can be large so we scope to the top level + creds files.
     chown "$uid:$gid" "$MOUNT_ROOT" "$DATA_DIR" 2>/dev/null || true
@@ -34,12 +36,18 @@ run_as() {
     [ -f "$MOUNT_ROOT/config.json" ] && chown "$uid:$gid" "$MOUNT_ROOT/config.json" 2>/dev/null || true
     exec gosu "$uid:$gid" "$0" "__inner__" "$@"
   fi
-  export HOME=/root
   exec "$0" "__inner__" "$@"
 }
 
 # --- 3. + 4. inner: git auth, then dispatch ----------------------------------
 inner() {
+  # HOME is unreliable across the gosu boundary (gosu resets it; a bare `docker
+  # run` may leave it empty). Pin it to a writable, uid-owned dir so gh writes
+  # its credential config where git will later read it.
+  export HOME="${HOME:-/home/node}"
+  [ -w "$HOME" ] 2>/dev/null || export HOME=/home/node
+  mkdir -p "$HOME" 2>/dev/null || true
+
   # Load .env so GH_TOKEN is present for gh auth setup-git below. The Node
   # process loads it again itself (BABYSIT_ENV_FILE) — this is just for gh.
   if [ -f "$BABYSIT_ENV_FILE" ]; then
@@ -47,6 +55,11 @@ inner() {
   fi
 
   local cmd="${1:-run}"; shift || true
+
+  # A bind-mounted clone can be owned by a uid that differs from the process
+  # (host-migrated repos, remapped PUID), which trips git's ownership guard.
+  # Trust any repo dir — this is a single-tenant container on the user's mount.
+  git config --global --add safe.directory '*' 2>/dev/null || true
 
   # `run` and `doctor` need git auth; `setup` runs its own gh validation.
   if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
