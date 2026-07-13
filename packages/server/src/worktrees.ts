@@ -64,9 +64,17 @@ export async function ensureBase(owner: string, repo: string): Promise<string> {
   const dir = clonePath(owner, repo);
 
   if (!existsSync(join(dir, ".git"))) {
-    await exec("gh", ["repo", "clone", `${owner}/${repo}`, dir, "--", "--no-tags"], {
-      maxBuffer: 32 * 1024 * 1024,
-    });
+    // Blobless partial clone: keep the FULL commit graph (so the overview/risks
+    // agents' `git diff origin/master...HEAD` merge-base still resolves) but
+    // fetch file blobs lazily on demand. Cuts a large repo's .git from ~1GB to
+    // ~100MB with no feature loss — only occasional lazy fetches when a diff or
+    // read touches a not-yet-present blob. (Prefer this over --depth, which
+    // would break the three-dot merge-base diff for PRs off older commits.)
+    await exec(
+      "gh",
+      ["repo", "clone", `${owner}/${repo}`, dir, "--", "--no-tags", "--filter=blob:none"],
+      { maxBuffer: 32 * 1024 * 1024 }
+    );
   }
 
   // Park on master, synced to origin/master. --force discards any leftover
