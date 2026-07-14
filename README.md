@@ -24,9 +24,23 @@ Node setup is documented further down.
 
 The image bundles the whole runtime — Node 22, `gh`, `git`, `yarn`, and
 Playwright Chromium — plus the prebuilt dashboard. **`./.data/` is the single
-source of truth:** creds + config live at its root (`./.data/.env`,
-`./.data/config.json`) alongside heavy state (SQLite `state.db`, repo clones,
-worktrees, CI logs). Everything persists on the host across image upgrades.
+source of truth**, tiered by how expensive each thing is to rebuild:
+
+```
+.data/
+  .env, config.json     creds + config (precious — hand-entered)
+  state.db              durable thread state (precious)
+  repos/                base clones + warm node_modules + private-package auth +
+                        pre-build output — EXPENSIVE to reprovision; kept outside cache/
+  cache/
+    worktrees/          per-fix checkouts (derive from repos/, cheap)
+    ci-logs/            materialized CI failure logs (cheap)
+```
+
+Everything persists on the host across image upgrades. `cache/` is safe to wipe
+wholesale — the daemon rebuilds it from `repos/` on the next poll — so a stuck
+worktree or stale log is a one-command fix (`make docker-reset-cache`) that never
+touches your creds or the costly base clones.
 
 ```bash
 make docker-build     # build the image (once, and after code changes)
@@ -122,6 +136,35 @@ npx tsx packages/server/src/cli.ts verdict <id> # run verdict on one thread (no 
 
 In the container, run these against the live daemon with
 `docker compose exec babysit-agent npm run -w @babysit/server list-prs`, etc.
+
+## Maintenance & recovery
+
+- **Clear the cache** (stuck worktree, stale CI logs): `make docker-reset-cache`
+  stops the daemon, wipes `.data/cache/`, and restarts. Base clones and creds are
+  untouched; worktrees are rebuilt from `repos/` on the next poll.
+
+- **A wedged base clone.** A base clone's `.git` can be left corrupt by an
+  interrupted fetch (daemon killed mid-poll, container OOM, disk full). The
+  symptom: a PR that sits in `error` every cycle and never clears. The daemon only
+  re-clones when a clone is *missing*, so a present-but-corrupt one won't
+  self-heal. Diagnose and get the exact fix with:
+
+  ```bash
+  make docker-recover     # probes each base clone; prints recovery commands (deletes nothing)
+  ```
+
+  It never deletes anything — it names the wedged clone(s) and prints the
+  commands to run, which delete the one repo dir so the next poll re-clones and
+  reprovisions it:
+
+  ```bash
+  make docker-down
+  rm -rf .data/repos/<owner>__<repo>
+  make docker-up
+  ```
+
+  (Deleting just `node_modules` inside a clone is always safe — the next poll
+  reinstalls it automatically; only a corrupt `.git` needs the whole dir gone.)
 
 ## Safety / rollout
 

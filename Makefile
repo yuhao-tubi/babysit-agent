@@ -60,6 +60,17 @@ docker-setup: ## Run the interactive setup wizard (writes ./.data/.env + ./.data
 docker-doctor: ## Validate creds + config non-interactively
 	docker run --rm -v "$(CURDIR)/.data":/data -e PUID=$(PUID) -e PGID=$(PGID) $(DOCKER_IMAGE) doctor
 
+.PHONY: docker-recover
+docker-recover: ## Probe base clones for corruption; print recovery commands (deletes nothing)
+	docker run --rm -v "$(CURDIR)/.data":/data -e PUID=$(PUID) -e PGID=$(PGID) $(DOCKER_IMAGE) recover
+
+.PHONY: docker-reset-cache
+docker-reset-cache: ## Stop daemon, wipe .data/cache (worktrees + ci-logs), restart — repos/creds untouched
+	docker compose down
+	rm -rf "$(CURDIR)/.data/cache"
+	PUID=$(PUID) PGID=$(PGID) docker compose up -d
+	@echo "Cache cleared; daemon restarted. Base clones + creds untouched."
+
 .PHONY: docker-up
 docker-up: ## Start the daemon in the background (docker compose)
 	PUID=$(PUID) PGID=$(PGID) docker compose up -d

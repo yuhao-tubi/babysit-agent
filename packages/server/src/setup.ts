@@ -5,6 +5,8 @@
  *                               write .env + config.json into the data mount.
  *   tsx src/setup.ts doctor   — non-interactive: re-validate the existing
  *                               .env + config.json and report (CI-friendly).
+ *   tsx src/setup.ts recover  — probe each base clone for corruption and PRINT
+ *                               the recovery commands (never deletes anything).
  *
  * "Validate live" means we actually exercise the credentials before writing:
  *   - GH_TOKEN     → `gh api user` (confirms the token + resolves the login)
@@ -215,13 +217,106 @@ async function runDoctor(): Promise<void> {
   if (!ok) throw new Error("doctor: checks failed");
 }
 
+/**
+ * Probe each base clone for corruption and PRINT a recovery script — never
+ * delete anything. A base clone's `.git` can be left wedged by an interrupted
+ * blobless fetch (daemon killed / container OOM / disk full); `ensureBase` only
+ * re-clones when `.git` is ABSENT, so a present-but-corrupt clone retries the
+ * same broken repo every poll and never self-heals. The fix is to delete the
+ * whole repo dir so the next poll re-clones it — but we leave that destructive
+ * act to the operator and just hand them the exact commands.
+ *
+ * This is a symptom probe, not `git fsck`: fsck reports missing blobs on a
+ * healthy blobless partial clone (that's the point of `--filter=blob:none`), so
+ * it can't tell wedged from fine. Instead we run the same cheap local reads the
+ * daemon relies on (`rev-parse HEAD`, `status`); if those throw, the object
+ * store / index is damaged.
+ */
+async function runRecover(): Promise<void> {
+  console.log("\nPR Babysitting Agent — recover\n" + "=".repeat(30) + "\n");
+
+  // Lazy import so the config module's env read happens after env.js has run.
+  const { loadConfig } = await import("./config.js");
+  const { reposRoot } = loadConfig();
+
+  if (!existsSync(reposRoot)) {
+    console.log(`No repos dir yet (${reposRoot}); nothing to check.`);
+    return;
+  }
+
+  const { readdirSync } = await import("node:fs");
+  const clones = readdirSync(reposRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
+
+  if (clones.length === 0) {
+    console.log(`No base clones under ${reposRoot}; nothing to check.`);
+    return;
+  }
+
+  const wedged: string[] = [];
+  for (const name of clones) {
+    const dir = join(reposRoot, name);
+    if (!existsSync(join(dir, ".git"))) {
+      // No .git → ensureBase re-clones on the next poll; self-heals, not wedged.
+      console.log(`  ${name}: ✓ (no .git — will re-clone on next poll)`);
+      continue;
+    }
+    const healthy = await probeClone(dir);
+    if (healthy) {
+      console.log(`  ${name}: ✓ healthy`);
+    } else {
+      console.log(`  ${name}: ✗ WEDGED (.git present but git ops fail)`);
+      wedged.push(name);
+    }
+  }
+
+  if (wedged.length === 0) {
+    console.log("\nAll base clones look healthy. Nothing to recover.");
+    return;
+  }
+
+  // `owner__repo` on disk → `owner/repo` display path is cosmetic; the recovery
+  // deletes the on-disk dir, so we print the real dir names.
+  console.log(
+    `\n${wedged.length} clone(s) need recovery. Run these commands on the host` +
+      ` (they delete the wedged clone so the next poll re-clones + reprovisions it):\n`
+  );
+  console.log("  make docker-down");
+  for (const name of wedged) {
+    console.log(`  rm -rf .data/repos/${name}`);
+  }
+  console.log("  make docker-up\n");
+  console.log(
+    "Native (no Docker)? Stop the daemon, delete the same dirs under your" +
+      " reposRoot, and restart — the next poll rebuilds them."
+  );
+}
+
+/**
+ * Cheap local integrity probe: resolve HEAD and read the index/worktree. These
+ * are exactly the reads `ensureBase` depends on, and they need no network, so a
+ * failure means a damaged object store or index — not a transient blip and not
+ * a lazily-absent blob. Returns true if the clone is usable.
+ */
+async function probeClone(dir: string): Promise<boolean> {
+  try {
+    await exec("git", ["rev-parse", "HEAD"], { cwd: dir });
+    await exec("git", ["status", "--porcelain"], { cwd: dir });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2] || "setup";
   try {
     if (cmd === "setup") await runSetup();
     else if (cmd === "doctor") await runDoctor();
+    else if (cmd === "recover") await runRecover();
     else {
-      console.error("usage: setup.ts <setup|doctor>");
+      console.error("usage: setup.ts <setup|doctor|recover>");
       process.exitCode = 1;
     }
   } finally {

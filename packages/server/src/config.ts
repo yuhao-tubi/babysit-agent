@@ -78,10 +78,15 @@ const DEFAULTS: Config = {
   pollIntervalMs: 300_000,
   port: 4317,
   dryRun: true,
+  // Repos hold the EXPENSIVE per-repo provisioning (clone + warm node_modules +
+  // private-package auth + pre-build), so they sit OUTSIDE cache/. Worktrees and
+  // CI logs derive from a base clone and are cheap to rebuild — they live under
+  // cache/ so it can be wiped wholesale (a stuck worktree, stale logs) without
+  // paying the reprovision cost. See README "Recovering a wedged clone".
   reposRoot: join(homedir(), ".babysit-agent", "repos"),
-  worktreesRoot: join(homedir(), ".babysit-agent", "worktrees"),
+  worktreesRoot: join(homedir(), ".babysit-agent", "cache", "worktrees"),
   dbPath: join(homedir(), ".babysit-agent", "state.db"),
-  ciLogsRoot: join(homedir(), ".babysit-agent", "ci-logs"),
+  ciLogsRoot: join(homedir(), ".babysit-agent", "cache", "ci-logs"),
   maxThreadAttempts: 2,
   maxGateFixAttempts: 2,
   botLogins: [
@@ -155,13 +160,16 @@ export function loadConfig(): Config {
   // Containerized runs bind-mount a single data dir (see Dockerfile). When
   // BABYSIT_DATA_DIR is set, root the heavy runtime state (db + clones +
   // worktrees) under it — but only for paths config.json did NOT set
-  // explicitly, so an operator override in config.json still wins.
+  // explicitly, so an operator override in config.json still wins. Repos are
+  // the expensive-to-reprovision tier and sit at the root; worktrees + ci-logs
+  // derive from them and live under cache/ (wholesale-wipeable). Keep this
+  // layout identical to the native defaults above.
   const dataDir = process.env.BABYSIT_DATA_DIR;
   if (dataDir) {
     if (fileCfg.reposRoot == null) merged.reposRoot = join(dataDir, "repos");
-    if (fileCfg.worktreesRoot == null) merged.worktreesRoot = join(dataDir, "worktrees");
+    if (fileCfg.worktreesRoot == null) merged.worktreesRoot = join(dataDir, "cache", "worktrees");
     if (fileCfg.dbPath == null) merged.dbPath = join(dataDir, "state.db");
-    if (fileCfg.ciLogsRoot == null) merged.ciLogsRoot = join(dataDir, "ci-logs");
+    if (fileCfg.ciLogsRoot == null) merged.ciLogsRoot = join(dataDir, "cache", "ci-logs");
   }
 
   merged.reposRoot = expandHome(merged.reposRoot);

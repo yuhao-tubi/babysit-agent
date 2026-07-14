@@ -7,7 +7,7 @@
 #      into the bind-mounted ./.data are owned by you, not root.
 #   3. Load creds from the mounted .env and run `gh auth setup-git` so the
 #      GH_TOKEN authorizes RAW git (clone/push), not just `gh api`.
-#   4. Dispatch: setup | run (default) | doctor  (anything else runs verbatim).
+#   4. Dispatch: setup | run (default) | doctor | recover  (else runs verbatim).
 set -euo pipefail
 
 DATA_DIR="${BABYSIT_DATA_DIR:-/data}"
@@ -70,9 +70,10 @@ inner() {
   fi
 
   case "$cmd" in
-    setup)  exec npm run --silent -w @babysit/server setup ;;
-    doctor) exec npm run --silent -w @babysit/server doctor ;;
-    run)    exec npm start ;;
+    setup)   exec npm run --silent -w @babysit/server setup ;;
+    doctor)  exec npm run --silent -w @babysit/server doctor ;;
+    recover) exec npm run --silent -w @babysit/server recover ;;
+    run)     exec npm start ;;
     *)      exec "$cmd" "$@" ;;  # escape hatch: run an arbitrary command
   esac
 }

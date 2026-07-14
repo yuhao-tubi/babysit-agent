@@ -11,6 +11,7 @@
     "start": "node dist/index.js",
     "setup": "node dist/setup.js setup",
     "doctor": "node dist/setup.js doctor",
+    "recover": "node dist/setup.js recover",
     "test": "tsx --test src/**/*.test.ts",
     "poll-once": "tsx src/cli.ts poll-once",
     "list-prs": "tsx src/cli.ts list-prs"

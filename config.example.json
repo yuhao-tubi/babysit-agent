@@ -4,9 +4,9 @@
   "port": 4317,
   "dryRun": true,
   "reposRoot": "~/.babysit-agent/repos",
-  "worktreesRoot": "~/.babysit-agent/worktrees",
+  "worktreesRoot": "~/.babysit-agent/cache/worktrees",
   "dbPath": "~/.babysit-agent/state.db",
-  "ciLogsRoot": "~/.babysit-agent/ci-logs",
+  "ciLogsRoot": "~/.babysit-agent/cache/ci-logs",
   "maxThreadAttempts": 2,
   "maxGateFixAttempts": 2,
   "botLogins": [
