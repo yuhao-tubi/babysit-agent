@@ -29,7 +29,12 @@ async function run(cmd: string, args: string[], cwd: string): Promise<{ ok: bool
     });
     return { ok: true, out: (stdout + stderr).slice(-4000) };
   } catch (err: any) {
-    return { ok: false, out: String(err?.stdout ?? "" + (err?.stderr ?? err?.message ?? err)).slice(-4000) };
+    // Include BOTH streams: tsc/eslint write diagnostics to stdout AND stderr,
+    // and which one carries the real errors varies by tool. (An earlier version
+    // read `err?.stdout ?? "" + err?.stderr` — `+` binds tighter than `??`, so a
+    // non-empty stdout silently dropped stderr, hiding the actual failures.)
+    const out = `${err?.stdout ?? ""}${err?.stderr ?? ""}`.trim() || String(err?.message ?? err);
+    return { ok: false, out: out.slice(-4000) };
   }
 }
 

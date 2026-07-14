@@ -12,6 +12,7 @@ import {
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
+import { runRepoSetup } from "./repo-setup.js";
 
 const exec = promisify(execFile);
 
@@ -83,6 +84,9 @@ export async function ensureBase(owner: string, repo: string): Promise<string> {
   await git(dir, ["checkout", "--force", "-B", BASE_BRANCH, `origin/${BASE_BRANCH}`]);
   await git(dir, ["reset", "--hard", `origin/${BASE_BRANCH}`]);
 
+  // Repo-specific host prep (e.g. www needs GitHub Packages auth) BEFORE deps —
+  // otherwise provisionDeps' `yarn install` 401s on private packages.
+  await runRepoSetup({ owner, repo, dir });
   await provisionDeps(dir);
   return dir;
 }
