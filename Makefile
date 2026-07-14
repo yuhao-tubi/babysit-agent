@@ -1,15 +1,23 @@
 # Makefile for the PR Babysitting Agent
 #
-# Docker is the run path: a self-contained image (Node 22, gh, git, yarn,
-# Playwright Chromium + the prebuilt dashboard) that persists all state under
-# the bind-mounted ./.data. Boot persistence is handled by the compose
-# `restart: unless-stopped` policy (+ Docker Desktop starting at login) — no
-# launchd/PID-file service management needed.
+# Native + launchd is the recommended run path on macOS: `npm run dev:server`
+# under a launchd agent (RunAtLoad + KeepAlive), reading/writing state directly
+# on the host disk (no VirtioFS I/O tax, real macOS escalation banners). A
+# self-contained Docker image is kept as an alternative (docker-* targets).
 
 SHELL := /bin/bash
 
 # Dashboard + API port (kept in sync with config.json and docker-compose.yml).
 SERVER_PORT := 4317
+
+# launchd (installed daemon) — see launchd/io.tubi.babysit-agent.plist
+LAUNCHD_LABEL  := io.tubi.babysit-agent
+LAUNCHD_PLIST  := launchd/$(LAUNCHD_LABEL).plist
+LAUNCHD_DEST   := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
+LAUNCHD_DOMAIN := gui/$(shell id -u)
+# Daemon logs live alongside state under the workspace .data/ (see the plist).
+DAEMON_OUT_LOG := $(CURDIR)/.data/daemon.out.log
+DAEMON_ERR_LOG := $(CURDIR)/.data/daemon.err.log
 
 .DEFAULT_GOAL := help
 
@@ -88,3 +96,40 @@ docker-restart: ## Recreate the daemon (picks up image/config changes)
 .PHONY: docker-logs
 docker-logs: ## Tail the daemon logs
 	docker compose logs -f
+
+# ---------------------------------------------------------------------------
+# launchd (native daemon — runs `npm run dev:server` at login, KeepAlive)
+# ---------------------------------------------------------------------------
+
+.PHONY: daemon-install
+daemon-install: ## Install & load the launchd agent (symlink plist, bootstrap)
+	@ln -sf "$(CURDIR)/$(LAUNCHD_PLIST)" "$(LAUNCHD_DEST)"
+	@launchctl bootstrap "$(LAUNCHD_DOMAIN)" "$(LAUNCHD_DEST)" 2>/dev/null || \
+		launchctl load "$(LAUNCHD_DEST)"
+	@echo "daemon installed and loaded ($(LAUNCHD_LABEL)). Dashboard: http://localhost:$(SERVER_PORT)"
+
+.PHONY: daemon-uninstall
+daemon-uninstall: ## Unload & remove the launchd agent
+	@launchctl bootout "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)" 2>/dev/null || \
+		launchctl unload "$(LAUNCHD_DEST)" 2>/dev/null || true
+	@rm -f "$(LAUNCHD_DEST)"
+	@echo "daemon uninstalled ($(LAUNCHD_LABEL))"
+
+.PHONY: daemon-restart
+daemon-restart: ## Restart the launchd daemon (picks up config.json changes)
+	@launchctl kickstart -k "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)"
+	@echo "daemon restarted ($(LAUNCHD_LABEL))"
+
+.PHONY: daemon-stop
+daemon-stop: ## Stop the launchd daemon (until next login/kickstart)
+	@launchctl kill SIGTERM "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)" 2>/dev/null || true
+	@echo "daemon stop signal sent ($(LAUNCHD_LABEL))"
+
+.PHONY: daemon-status
+daemon-status: ## Show launchd daemon status (PID / last exit code)
+	@launchctl list | grep -E "PID|$(LAUNCHD_LABEL)" || echo "$(LAUNCHD_LABEL): not loaded"
+
+.PHONY: daemon-logs
+daemon-logs: ## Tail the launchd daemon's stdout + stderr logs
+	@touch "$(DAEMON_OUT_LOG)" "$(DAEMON_ERR_LOG)"
+	@tail -n 50 -f "$(DAEMON_OUT_LOG)" "$(DAEMON_ERR_LOG)"
