@@ -210,11 +210,10 @@ async function annotateBranchAdvances(
       const commits = await compareCommits(owner, repo, prev.base, currentHead);
       updateThread(t.id, { newCommits: { base: prev.base, head: currentHead, commits } });
       if (commits.length) {
-        logEvent(
-          t.id,
-          "branch_advanced",
-          `${commits.length} commit(s) pushed since this thread stalled (${prev.base.slice(0, 7)}->${currentHead.slice(0, 7)})`
-        );
+        // Surface the advance via the dedicated "new commits" panel (driven by
+        // `newCommits`), NOT a timeline event: every poll re-detects the same
+        // advance until the thread clears, so logging it spammed the Activity
+        // timeline with duplicate `branch_advanced` entries.
         emit({ type: "thread_updated", threadId: t.id });
       }
     } catch (err: any) {
