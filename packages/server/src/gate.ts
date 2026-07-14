@@ -71,6 +71,19 @@ export async function runGate(dir: string, repo: string, opts: GateOpts = {}): P
 
     if (required.length) {
       const details: string[] = [];
+      // Monorepo prerequisite: `typecheck-app` (tsc --noEmit) resolves the
+      // workspace packages via their built `lib/*.d.ts`, but `yarn install` only
+      // symlinks them — the .d.ts don't exist until each package is compiled.
+      // Without this, www's typecheck floods with TS2307 "Cannot find module
+      // '@adrise/*'" for every internal package. `pre-build` (lerna run build)
+      // compiles them. Run it first when present; a failure fails the gate.
+      if (scripts["pre-build"]) {
+        const pb = await run(runner, hasYarn ? ["pre-build"] : ["run", "pre-build"], dir);
+        details.push(`${runner} pre-build: ${pb.ok ? "passed" : "FAILED"}\n${pb.out}`);
+        if (!pb.ok) {
+          return { ran: true, passed: false, detail: details.join("\n---\n") };
+        }
+      }
       for (const script of required) {
         const args = hasYarn ? [script] : ["run", script];
         const r = await run(runner, args, dir);
