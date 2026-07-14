@@ -121,25 +121,22 @@ npm run -w @babysit/server poll-once
 npx tsx packages/server/src/cli.ts verdict <threadId>
 ```
 
-## Applying frontend changes to the running daemon
+## Applying changes to the running daemon
 
-The daemon serves the **prebuilt** `packages/web/dist` via `@fastify/static` — it
-does **not** bundle the web app on the fly. So a change to `packages/web/src` is
-invisible until you rebuild that bundle:
-
-```bash
-npm run -w @babysit/web build   # rebuild dist; then hard-refresh the browser
-```
-
-`@fastify/static` reads files from disk per request, so **no daemon restart is
-needed** after a web-only change — just rebuild and refresh. (For live UI work,
-`npm run dev:web` gives hot reload while proxying the API to the daemon.) Restart
-the daemon only when you change **server** source — and even then `tsx watch`
-auto-reloads it.
-
-The daemon runs under launchd (`io.tubi.babysit-agent`, `KeepAlive=true`), so
-`kill`ing it just respawns it with a new PID. To actually restart it:
+The daemon runs from the Docker image: the built server plus the **prebuilt**
+`packages/web/dist` (served via `@fastify/static`) are baked into the image at
+build time — neither is bundled on the fly or bind-mounted. So any source change,
+frontend or backend, is invisible to the running container until you rebuild the
+image and recreate the container:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/io.tubi.babysit-agent
+make docker-build     # rebuild the image with your changes
+make docker-restart   # recreate the container (compose up -d --force-recreate)
 ```
+
+Then hard-refresh the browser for a frontend change.
+
+For live UI work, skip Docker: `npm run dev:web` gives hot reload while proxying
+the API to a daemon — pair it with `npm run dev:server` (`tsx watch`) for a
+native dev loop against the same code. Boot persistence for the deployed daemon
+is handled by `restart: unless-stopped` in `docker-compose.yml`.

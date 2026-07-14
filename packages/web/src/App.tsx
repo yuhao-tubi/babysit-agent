@@ -392,7 +392,7 @@ function PrNode({
                   margin: "2px 0",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  // whiteSpace: "nowrap",
                 }}
               >
                 {pr.title}

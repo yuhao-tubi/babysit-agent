@@ -132,8 +132,7 @@ In the container, run these against the live daemon with
 Guardrails: fast-forward-only push (aborts if the branch moved), `risk:"high"`
 forces escalate, serial per-repo queue, and a per-thread auto-fix limit.
 
-## Optional: run at login (launchd)
+## Run at login
 
-For a native macOS install, `make daemon-install` symlinks and loads
-`launchd/io.tubi.babysit-agent.plist`. For the Docker path, `restart:
-unless-stopped` in `docker-compose.yml` already restarts the daemon at boot.
+`restart: unless-stopped` in `docker-compose.yml` restarts the daemon at boot
+(as long as Docker Desktop is set to start at login) — nothing else to install.
