@@ -23,10 +23,10 @@ Node setup is documented further down.
 ## Quick start (Docker)
 
 The image bundles the whole runtime — Node 22, `gh`, `git`, `yarn`, and
-Playwright Chromium — plus the prebuilt dashboard. **The current folder is the
-single source of truth:** creds + config live at its root (`./.env`,
-`./config.json`) and heavy state (SQLite `state.db`, repo clones, worktrees)
-under `./data/`. Everything persists on the host across image upgrades.
+Playwright Chromium — plus the prebuilt dashboard. **`./.data/` is the single
+source of truth:** creds + config live at its root (`./.data/.env`,
+`./.data/config.json`) alongside heavy state (SQLite `state.db`, repo clones,
+worktrees, CI logs). Everything persists on the host across image upgrades.
 
 ```bash
 make docker-build     # build the image (once, and after code changes)
@@ -38,18 +38,18 @@ make docker-logs      # tail logs;   make docker-down  to stop
 `make docker-setup` prompts for your **GitHub token** (a PAT with `repo` scope —
 `gh` uses it for both the API and raw `git push`) and your **KeySmith** key, then
 validates them live (`gh api user` + a real Bedrock token mint) before writing
-`./.env` and `./config.json`. Re-validate any time with `make docker-doctor`.
+`./.data/.env` and `./.data/config.json`. Re-validate any time with `make docker-doctor`.
 
 Equivalent raw `docker run` (compose is just a wrapper):
 
 ```bash
 docker build -t babysit-agent:latest .
 # one-time setup wizard (interactive)
-docker run -it --rm -v "$PWD":/data -e PUID=$(id -u) -e PGID=$(id -g) \
+docker run -it --rm -v "$PWD/.data":/data -e PUID=$(id -u) -e PGID=$(id -g) \
   babysit-agent:latest setup
 # run the daemon
 docker run -d --name babysit-agent --restart unless-stopped \
-  -p 4317:4317 -v "$PWD":/data -e PUID=$(id -u) -e PGID=$(id -g) \
+  -p 4317:4317 -v "$PWD/.data":/data -e PUID=$(id -u) -e PGID=$(id -g) \
   babysit-agent:latest run
 ```
 

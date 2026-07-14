@@ -6,6 +6,7 @@
   "reposRoot": "~/.babysit-agent/repos",
   "worktreesRoot": "~/.babysit-agent/worktrees",
   "dbPath": "~/.babysit-agent/state.db",
+  "ciLogsRoot": "~/.babysit-agent/ci-logs",
   "maxThreadAttempts": 2,
   "maxGateFixAttempts": 2,
   "botLogins": [

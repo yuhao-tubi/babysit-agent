@@ -1,8 +1,8 @@
 # Run the PR Babysitting Agent as a persistent daemon.
 #
-# The current folder is the single source of truth: creds + config sit at the
-# mount root (./.env, ./config.json) and heavy state (db, repo clones,
-# worktrees) under ./data/. Run `make docker-setup` once to populate them, then
+# ./.data is the single source of truth: creds + config sit at its root
+# (./.data/.env, ./.data/config.json) alongside heavy state (db, repo clones,
+# worktrees, ci-logs). Run `make docker-setup` once to populate it, then
 # `docker compose up -d`.
 services:
   babysit-agent:
@@ -14,15 +14,22 @@ services:
     ports:
       - "4317:4317" # dashboard + API
     volumes:
-      # $PWD -> /data : .env, config.json, and ./data/ all persist on the host.
-      - ./:/data
+      # ./.data -> /data : .env, config.json, and all state persist on the host.
+      - ./.data:/data
     environment:
-      # Own the files written into ./data as your host user (avoids root-owned
+      # Own the files written into ./.data as your host user (avoids root-owned
       # files). Override on the CLI: `PUID=$(id -u) PGID=$(id -g) docker compose up`.
       - PUID=${PUID:-}
       - PGID=${PGID:-}
+      # Node's default heap (~2GB) is too small for big monorepos' `tsc --noEmit`
+      # (adRise/www's typecheck OOMs, SIGABRT 134). Raise it for every Node child
+      # the gate/agent shells out to. Keep it below the container memory limit.
+      - NODE_OPTIONS=--max-old-space-size=8192
     deploy:
       resources:
         limits:
-          memory: 4G
+          # www's full typecheck needs headroom above the 8GB Node heap; 4G OOM'd.
+          # Requires the Docker Desktop VM memory be raised to >=16GB (Settings →
+          # Resources) — the VM caps what any container can claim.
+          memory: 12G
           cpus: "2.0"

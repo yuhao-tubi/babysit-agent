@@ -2,8 +2,9 @@
 #
 # Bundles the whole runtime (Node 22, gh, git, yarn, Playwright Chromium) and
 # the prebuilt dashboard. State + creds live in a bind-mounted data dir at
-# /data (see docker-compose.yml / README): /data/.env, /data/config.json, and
-# heavy churny state under /data/data (db, repo clones, worktrees).
+# /data (host ./.data — see docker-compose.yml / README): /data/.env,
+# /data/config.json, and heavy churny state (db, repo clones, worktrees,
+# ci-logs) directly under /data — no extra nesting.
 FROM node:22-bookworm
 
 # --- OS tooling the daemon shells out to --------------------------------------
@@ -45,7 +46,7 @@ COPY . .
 RUN npm run build
 
 # The daemon's state + creds are rooted here at runtime via env (see entrypoint).
-ENV BABYSIT_DATA_DIR=/data/data \
+ENV BABYSIT_DATA_DIR=/data \
     BABYSIT_ENV_FILE=/data/.env \
     BABYSIT_CONFIG=/data/config.json \
     BABYSIT_DISABLE_BANNERS=1 \

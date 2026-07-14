@@ -2,15 +2,15 @@
 # Container entrypoint for the PR Babysitting Agent.
 #
 # Responsibilities, in order:
-#   1. Ensure the /data mount + its state subdir exist.
+#   1. Ensure the /data mount exists.
 #   2. Optionally drop to the host user's UID/GID (PUID/PGID) so files written
-#      into the bind-mounted ./data are owned by you, not root.
+#      into the bind-mounted ./.data are owned by you, not root.
 #   3. Load creds from the mounted .env and run `gh auth setup-git` so the
 #      GH_TOKEN authorizes RAW git (clone/push), not just `gh api`.
 #   4. Dispatch: setup | run (default) | doctor  (anything else runs verbatim).
 set -euo pipefail
 
-DATA_DIR="${BABYSIT_DATA_DIR:-/data/data}"
+DATA_DIR="${BABYSIT_DATA_DIR:-/data}"
 MOUNT_ROOT="/data"
 
 # --- 1. data dirs -------------------------------------------------------------
@@ -18,7 +18,7 @@ mkdir -p "$DATA_DIR"
 
 # --- 2. privilege drop (optional) --------------------------------------------
 # If PUID/PGID are set (or we can infer them from the mount's owner), run the
-# app as that user so ./data files are host-editable. Default: stay root.
+# app as that user so ./.data files are host-editable. Default: stay root.
 run_as() {
   if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
     local uid="${PUID:-0}" gid="${PGID:-0}"

@@ -8,7 +8,6 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadConfig } from "./config.js";
 import { getChecks, getFailedCheckLogs } from "./gh.js";
@@ -59,7 +58,7 @@ export function ciFeedbackId(checkName: string, headSha: string): number {
 
 /** Absolute path where a CI failure's log is materialized — OUTSIDE any worktree. */
 export function ciLogPath(threadId: number): string {
-  return join(homedir(), ".babysit-agent", "ci-logs", `${threadId}.log`);
+  return join(loadConfig().ciLogsRoot, `${threadId}.log`);
 }
 
 /** Best-effort removal of a thread's materialized CI log (called on finalize). */

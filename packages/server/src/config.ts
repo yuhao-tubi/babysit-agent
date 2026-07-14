@@ -27,6 +27,8 @@ export interface Config {
   /** Where per-fix git worktrees live (separate from the persistent base clones). */
   worktreesRoot: string;
   dbPath: string;
+  /** Where CI failure logs are materialized (OUTSIDE any worktree, so never committed). */
+  ciLogsRoot: string;
   maxThreadAttempts: number;
   /** Max times the fix agent re-runs to repair gate (lint/typecheck) errors it introduced, per fix. */
   maxGateFixAttempts: number;
@@ -79,6 +81,7 @@ const DEFAULTS: Config = {
   reposRoot: join(homedir(), ".babysit-agent", "repos"),
   worktreesRoot: join(homedir(), ".babysit-agent", "worktrees"),
   dbPath: join(homedir(), ".babysit-agent", "state.db"),
+  ciLogsRoot: join(homedir(), ".babysit-agent", "ci-logs"),
   maxThreadAttempts: 2,
   maxGateFixAttempts: 2,
   botLogins: [
@@ -158,11 +161,13 @@ export function loadConfig(): Config {
     if (fileCfg.reposRoot == null) merged.reposRoot = join(dataDir, "repos");
     if (fileCfg.worktreesRoot == null) merged.worktreesRoot = join(dataDir, "worktrees");
     if (fileCfg.dbPath == null) merged.dbPath = join(dataDir, "state.db");
+    if (fileCfg.ciLogsRoot == null) merged.ciLogsRoot = join(dataDir, "ci-logs");
   }
 
   merged.reposRoot = expandHome(merged.reposRoot);
   merged.worktreesRoot = expandHome(merged.worktreesRoot);
   merged.dbPath = expandHome(merged.dbPath);
+  merged.ciLogsRoot = expandHome(merged.ciLogsRoot);
 
   // Env overrides for quick toggles.
   if (process.env.BABYSIT_DRY_RUN != null) {

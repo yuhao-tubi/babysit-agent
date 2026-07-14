@@ -7,3 +7,5 @@ config.json
 .run/
 # local runtime state (db, repo clones) lives under ~/.babysit-agent by default
 data/
+# Docker deployment bind-mount: creds + config + all state (see docker-compose.yml)
+.data/
