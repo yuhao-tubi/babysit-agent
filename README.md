@@ -132,9 +132,9 @@ cp config.example.json config.json   # edit; dryRun defaults to true
 cp .env.example .env                  # KeySmith key (+ GH_TOKEN if gh isn't logged in)
 npm run build                         # build the dashboard bundle the daemon serves
 
-make install    # symlink + load the launchd agent (starts at login, KeepAlive)
-make logs       # tail stdout/stderr;  make status  for PID/last exit
-make restart    # pick up config.json changes;  make stop / uninstall
+make start    # symlink + load the launchd agent (starts at login, KeepAlive)
+make logs     # tail stdout/stderr;  make status  for PID/last exit
+make restart  # pick up config.json changes;  make stop / uninstall
 ```
 
 The launchd agent runs `npm run dev:server` (tsx watch) from
@@ -145,7 +145,7 @@ For a foreground dev loop instead of the installed daemon:
 
 ```bash
 npm run dev:web        # dashboard dev server (hot reload) — http://localhost:4318
-npm run dev:server     # daemon (tsx watch)
+make dev               # daemon in the foreground (tsx watch)
 npm run build && npm start   # production; serves built dashboard at :4317
 ```
 
@@ -201,7 +201,7 @@ forces escalate, serial per-repo queue, and a per-thread auto-fix limit.
 
 ## Run at login
 
-The native path uses launchd: `make install` symlinks and loads
+The native path uses launchd: `make start` symlinks and loads
 `launchd/io.tubi.babysit-agent.plist` (`RunAtLoad` + `KeepAlive`), so the daemon
 starts at login and respawns on crash — see [Run natively](#run-natively-recommended)
 for the full target list. For the Docker path, `restart: unless-stopped`

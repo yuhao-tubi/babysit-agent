@@ -109,8 +109,12 @@ setup: ## Interactive native setup wizard (prompts + validates creds, writes ./.
 doctor: ## Validate the existing ./.env + ./config.json creds non-interactively
 	npx tsx packages/server/src/setup.ts doctor
 
-.PHONY: install
-install: ## Install & load the launchd agent (symlink plist, bootstrap)
+.PHONY: dev
+dev: ## Run the daemon in the foreground (tsx watch; Ctrl-C to stop)
+	npm run dev:server
+
+.PHONY: start
+start: ## Install & load the launchd agent (symlink plist, bootstrap)
 	@ln -sf "$(CURDIR)/$(LAUNCHD_PLIST)" "$(LAUNCHD_DEST)"
 	@launchctl bootstrap "$(LAUNCHD_DOMAIN)" "$(LAUNCHD_DEST)" 2>/dev/null || \
 		launchctl load "$(LAUNCHD_DEST)"
