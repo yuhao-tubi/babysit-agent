@@ -32,7 +32,7 @@ function mayAutoPush(s: ThreadRow, verdict: Verdict): boolean {
   return cfg.autoPushClasses.includes(s.authorClass);
 }
 
-const FIX_SYSTEM = `You are fixing code-review feedback on a checkout of a PR branch. Make ONLY the change the feedback requests — do not refactor surrounding code. Use Edit/Write to change files. Do NOT commit, push, or run git; the harness handles that. When done, briefly state what you changed.`;
+const FIX_SYSTEM = `You are fixing code-review feedback on a checkout of a PR branch. Make ONLY the change the feedback requests — do not refactor surrounding code. Use Edit/Write to change files. Do NOT commit, push, or run git; the harness handles that. Keep the change small: an autonomous fix should touch only a handful of files. If addressing the feedback properly would require editing many files (a large refactor), do NOT attempt it — stop and briefly explain that it is too large. When done, briefly state what you changed.`;
 
 /** Pick a feedback item suitable for posting a reply against (inline thread root). */
 function replyTarget(items: FeedbackItem[]): FeedbackItem | undefined {
@@ -222,6 +222,9 @@ async function proposeCode(
     let fixSummary = "";
     let diff = "";
     let gateFixAttempt = 0;
+    // Set when the gate failed but only on files the fix didn't touch. The
+    // proposal is still parked (gate inconclusive), never auto-pushed.
+    let gateInconclusive = false;
     let prompt = isCi
       ? buildCiFixPrompt(s, ciLogPath, verdict, instruction)
       : buildFixPrompt(s, items, instruction);
@@ -248,9 +251,29 @@ async function proposeCode(
         return "blocked";
       }
 
+      // Size guard: an autonomous fix must stay an easy, reviewable change. A
+      // diff touching more than `maxProposalFiles` files (source + test + config,
+      // no exemptions) is too large to apply automatically — pivot to a Manual
+      // plan (the copy-paste-into-Claude-Code handoff) instead of parking a
+      // Proposal. The fix prompt also softly hints this limit so the agent bails
+      // early; this is the deterministic backstop that actually enforces it.
+      const touched = changedFiles(diff);
+      if (touched.length > cfg.maxProposalFiles) {
+        logEvent(s.id, "fix_too_large", `fix touched ${touched.length} files (> ${cfg.maxProposalFiles}); generating a manual plan`);
+        return await proposeManualPlan(s, verdict, items, dir, instruction);
+      }
+
       // Pre-push gate. For CI fixes the gate runs the failing check's class
       // (build / unit test) in addition to the typecheck+lint floor (Q9b/Q22).
-      const gate = await runGate(dir, s.repo, isCi ? { ciClass, testTarget: verdict.ci_test_target } : {});
+      // Non-CI (owner-reviewed) proposals use the light gate: verify the diff
+      // (incremental typecheck + lint on changed files) instead of the whole repo.
+      const gate = await runGate(
+        dir,
+        s.repo,
+        isCi
+          ? { ciClass, testTarget: verdict.ci_test_target }
+          : { light: true, changedFiles: changedFiles(diff) }
+      );
       logEvent(s.id, "gate", gate.detail.slice(0, 1000));
       if (gate.ran && gate.passed) break;
 
@@ -265,9 +288,13 @@ async function proposeCode(
       // the failure references files the agent changed.
       const changed = changedFiles(diff);
       if (!isCi && !gateMentionsChangedFiles(gate.detail, changed)) {
-        logEvent(s.id, "gate_unrelated", "gate errors are in files the fix didn't touch; escalating");
-        notifyEscalation(s.id, s.prKey, "proposal failed checks (pre-existing/unrelated errors); needs review");
-        return "blocked";
+        // Every failure is outside the diff — a dirty baseline the fix agent
+        // can't (and shouldn't) repair. Don't dead-end: park the proposal
+        // flagged inconclusive so the owner can review the diff and make an
+        // informed Approve. The re-gate on Approve applies the same filter.
+        logEvent(s.id, "gate_inconclusive", "gate failed only on files the fix didn't touch (pre-existing); parking proposal for owner review");
+        gateInconclusive = true;
+        break;
       }
       if (gateFixAttempt >= cfg.maxGateFixAttempts) {
         logEvent(s.id, "gate_fix_exhausted", `>= ${cfg.maxGateFixAttempts} gate-fix attempts; escalating`);
@@ -279,23 +306,33 @@ async function proposeCode(
       prompt = buildGateFixPrompt(gate.detail, changed);
     }
 
-    // Gate passed. Either auto-push (scoped classes) or freeze + park.
-    if (mayAutoPush(s, verdict)) {
+    // Gate passed cleanly. Either auto-push (scoped classes) or freeze + park.
+    // An inconclusive gate never auto-pushes — it always waits for the owner's
+    // informed Approve, even for autoPushClasses (mayAutoPush vetoes it).
+    if (!gateInconclusive && mayAutoPush(s, verdict)) {
       return await pushVerifiedDiff(s, verdict, items, head.headRefName, baseSha, dir, diff, fixSummary, isCi);
     }
 
-    // Park: freeze the gate-passed diff for the owner to Approve. Writes nothing
-    // to GitHub, so dryRun is irrelevant here — the push happens only on Approve.
+    // Park: freeze the diff for the owner to Approve. Writes nothing to GitHub,
+    // so dryRun is irrelevant here — the push happens only on Approve.
     const proposal: Proposal = {
       kind: "code",
       planMarkdown: verdict.summary || fixSummary || "Proposed code change.",
       baseSha,
-      gatePassed: true,
+      gatePassed: !gateInconclusive,
+      gateInconclusive: gateInconclusive || undefined,
       diff,
       replyDraft: verdict.reply_draft || fixSummary || "",
     };
     updateThread(s.id, { proposal, diff: null });
-    logEvent(s.id, "proposed", `gate-passed proposal ready; awaiting approval (base ${baseSha.slice(0, 7)})`);
+    logEvent(
+      s.id,
+      "proposed",
+      gateInconclusive
+        ? `proposal ready (gate inconclusive — pre-existing errors elsewhere); awaiting approval (base ${baseSha.slice(0, 7)})`
+        : `gate-passed proposal ready; awaiting approval (base ${baseSha.slice(0, 7)})`
+    );
+    if (gateInconclusive) notifyEscalation(s.id, s.prKey, "proposal ready but gate couldn't pass cleanly (pre-existing errors); review & approve");
     if (verdict.risk === "high") notifyEscalation(s.id, s.prKey, verdict.summary || "high-risk change; review the proposal");
     emit({ type: "thread_updated", threadId: s.id });
     return "awaiting_approval";
@@ -438,11 +475,29 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     const isCi = s.authorClass === "ci";
     const ciClass = items.find((i) => i.ciClass)?.ciClass;
     const verdict: Verdict | null = s.verdictJson ? JSON.parse(s.verdictJson) : null;
-    const gate = await runGate(dir, s.repo, isCi ? { ciClass, testTarget: verdict?.ci_test_target } : {});
+    const gate = await runGate(
+      dir,
+      s.repo,
+      isCi
+        ? { ciClass, testTarget: verdict?.ci_test_target }
+        : { light: true, changedFiles: changedFiles(proposal.diff) }
+    );
     logEvent(s.id, "gate", `re-gate on approve: ${gate.detail.slice(0, 1000)}`);
-    if (!gate.ran || !gate.passed) {
+    if (!gate.ran) {
       notifyEscalation(s.id, s.prKey, "proposal still applies but checks now fail on current HEAD; send an instruction to re-propose");
       return "blocked";
+    }
+    if (!gate.passed) {
+      // Failures only in files the diff didn't touch = the same dirty baseline
+      // the owner already saw flagged. Approve is their informed override, so
+      // push anyway. A failure that DOES reference the diff means the frozen
+      // bytes no longer build on current HEAD — block and ask for a re-propose.
+      const changed = changedFiles(proposal.diff);
+      if (isCi || gateMentionsChangedFiles(gate.detail, changed)) {
+        notifyEscalation(s.id, s.prKey, "proposal still applies but checks now fail on current HEAD; send an instruction to re-propose");
+        return "blocked";
+      }
+      logEvent(s.id, "gate_inconclusive", "re-gate failed only on files the diff didn't touch (pre-existing); pushing per owner approval");
     }
 
     if (cfg.dryRun) {

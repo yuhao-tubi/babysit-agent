@@ -173,8 +173,48 @@ export async function addWorktree(
   // Read-only consumers (e.g. the PR-overview investigation) never build or run
   // tests, so provisioning deps — a CoW clone of a multi-GB node_modules plus a
   // possible top-up install — is pure waste. Skip it for them.
-  if (!opts.skipDeps) await shareDeps(base, wt);
+  if (!opts.skipDeps) {
+    await shareDeps(base, wt);
+    await seedBuildArtifacts(base, wt);
+  }
   return { dir: wt, remoteSha };
+}
+
+/**
+ * Seed the base clone's already-compiled, gitignored build outputs into the
+ * worktree so the gate doesn't have to rebuild them. A monorepo's internal
+ * packages (e.g. www's `@adrise/*`) resolve via each package's built
+ * `lib/*.d.ts`, but those are gitignored — a fresh `git worktree add` doesn't
+ * bring them, which is what forces `pre-build` (`lerna run build`) to run before
+ * every typecheck. The base clone builds them once (during CI-fix gates); reuse
+ * that here via APFS copy-on-write (near-instant) so the light gate can run an
+ * INCREMENTAL `typecheck-app` against seeded `.d.ts` + `.tsbuildinfo` instead of
+ * a full monorepo build. Repo-agnostic and best-effort: no-op when the base has
+ * no such artifacts, and a copy failure never blocks the worktree.
+ */
+async function seedBuildArtifacts(base: string, wt: string): Promise<void> {
+  const copyCoW = async (rel: string) => {
+    const src = join(base, rel);
+    const dst = join(wt, rel);
+    if (!existsSync(src) || existsSync(dst)) return;
+    try {
+      await exec("cp", ["-cR", src, dst], { maxBuffer: 64 * 1024 * 1024 });
+    } catch {
+      /* best-effort — the gate rebuilds if the artifact is missing */
+    }
+  };
+
+  // Built package outputs: packages/<pkg>/lib (compiled .js + .d.ts).
+  const pkgsDir = join(base, "packages");
+  if (existsSync(pkgsDir)) {
+    for (const ent of readdirSync(pkgsDir, { withFileTypes: true })) {
+      if (ent.isDirectory()) await copyCoW(join("packages", ent.name, "lib"));
+    }
+  }
+  // Incremental tsc state at the repo root (makes typecheck-app incremental).
+  for (const ent of readdirSync(base, { withFileTypes: true })) {
+    if (ent.isFile() && ent.name.endsWith(".tsbuildinfo")) await copyCoW(ent.name);
+  }
 }
 
 /**

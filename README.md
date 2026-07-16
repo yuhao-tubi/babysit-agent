@@ -132,9 +132,9 @@ cp config.example.json config.json   # edit; dryRun defaults to true
 cp .env.example .env                  # KeySmith key (+ GH_TOKEN if gh isn't logged in)
 npm run build                         # build the dashboard bundle the daemon serves
 
-make daemon-install    # symlink + load the launchd agent (starts at login, KeepAlive)
-make daemon-logs       # tail stdout/stderr;  make daemon-status  for PID/last exit
-make daemon-restart    # pick up config.json changes;  make daemon-stop / daemon-uninstall
+make install    # symlink + load the launchd agent (starts at login, KeepAlive)
+make logs       # tail stdout/stderr;  make status  for PID/last exit
+make restart    # pick up config.json changes;  make stop / uninstall
 ```
 
 The launchd agent runs `npm run dev:server` (tsx watch) from
@@ -201,9 +201,9 @@ forces escalate, serial per-repo queue, and a per-thread auto-fix limit.
 
 ## Run at login
 
-The native path uses launchd: `make daemon-install` symlinks and loads
+The native path uses launchd: `make install` symlinks and loads
 `launchd/io.tubi.babysit-agent.plist` (`RunAtLoad` + `KeepAlive`), so the daemon
 starts at login and respawns on crash — see [Run natively](#run-natively-recommended)
-for the full `daemon-*` target list. For the Docker path, `restart: unless-stopped`
+for the full target list. For the Docker path, `restart: unless-stopped`
 in `docker-compose.yml` restarts the container at boot instead (as long as Docker
 Desktop is set to start at login).

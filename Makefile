@@ -33,8 +33,8 @@ help: ## Show this help
 		| sort \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: install
-install: ## Install all workspace dependencies
+.PHONY: deps
+deps: ## Install all workspace dependencies
 	npm install
 
 .PHONY: build
@@ -101,35 +101,43 @@ docker-logs: ## Tail the daemon logs
 # launchd (native daemon — runs `npm run dev:server` at login, KeepAlive)
 # ---------------------------------------------------------------------------
 
-.PHONY: daemon-install
-daemon-install: ## Install & load the launchd agent (symlink plist, bootstrap)
+.PHONY: setup
+setup: ## Interactive native setup wizard (prompts + validates creds, writes ./.env + ./config.json)
+	npx tsx packages/server/src/setup.ts setup
+
+.PHONY: doctor
+doctor: ## Validate the existing ./.env + ./config.json creds non-interactively
+	npx tsx packages/server/src/setup.ts doctor
+
+.PHONY: install
+install: ## Install & load the launchd agent (symlink plist, bootstrap)
 	@ln -sf "$(CURDIR)/$(LAUNCHD_PLIST)" "$(LAUNCHD_DEST)"
 	@launchctl bootstrap "$(LAUNCHD_DOMAIN)" "$(LAUNCHD_DEST)" 2>/dev/null || \
 		launchctl load "$(LAUNCHD_DEST)"
 	@echo "daemon installed and loaded ($(LAUNCHD_LABEL)). Dashboard: http://localhost:$(SERVER_PORT)"
 
-.PHONY: daemon-uninstall
-daemon-uninstall: ## Unload & remove the launchd agent
+.PHONY: uninstall
+uninstall: ## Unload & remove the launchd agent
 	@launchctl bootout "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)" 2>/dev/null || \
 		launchctl unload "$(LAUNCHD_DEST)" 2>/dev/null || true
 	@rm -f "$(LAUNCHD_DEST)"
 	@echo "daemon uninstalled ($(LAUNCHD_LABEL))"
 
-.PHONY: daemon-restart
-daemon-restart: ## Restart the launchd daemon (picks up config.json changes)
+.PHONY: restart
+restart: ## Restart the launchd agent (picks up config.json changes)
 	@launchctl kickstart -k "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)"
 	@echo "daemon restarted ($(LAUNCHD_LABEL))"
 
-.PHONY: daemon-stop
-daemon-stop: ## Stop the launchd daemon (until next login/kickstart)
+.PHONY: stop
+stop: ## Stop the launchd agent (until next login/kickstart)
 	@launchctl kill SIGTERM "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)" 2>/dev/null || true
 	@echo "daemon stop signal sent ($(LAUNCHD_LABEL))"
 
-.PHONY: daemon-status
-daemon-status: ## Show launchd daemon status (PID / last exit code)
+.PHONY: status
+status: ## Show launchd agent status (PID / last exit code)
 	@launchctl list | grep -E "PID|$(LAUNCHD_LABEL)" || echo "$(LAUNCHD_LABEL): not loaded"
 
-.PHONY: daemon-logs
-daemon-logs: ## Tail the launchd daemon's stdout + stderr logs
+.PHONY: logs
+logs: ## Tail the launchd agent's stdout + stderr logs
 	@touch "$(DAEMON_OUT_LOG)" "$(DAEMON_ERR_LOG)"
 	@tail -n 50 -f "$(DAEMON_OUT_LOG)" "$(DAEMON_ERR_LOG)"

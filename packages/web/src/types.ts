@@ -136,6 +136,8 @@ export interface Proposal {
   planMarkdown: string;
   baseSha: string;
   gatePassed: boolean;
+  /** Gate failed only on files the fix didn't touch; Approve is an informed override. */
+  gateInconclusive?: boolean;
   diff?: string;
   proposedBody?: string;
   bodyDiff?: string;

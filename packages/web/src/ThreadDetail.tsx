@@ -348,6 +348,9 @@ export function ThreadDetailView({
               {detail.proposal.gatePassed && detail.proposal.kind === "code" && (
                 <Tag color="success">gate passed</Tag>
               )}
+              {detail.proposal.gateInconclusive && detail.proposal.kind === "code" && (
+                <Tag color="warning">gate inconclusive — pre-existing errors elsewhere</Tag>
+              )}
               {detail.proposal.changeApplied && <Tag color="success">applied</Tag>}
             </Space>
           }
@@ -395,6 +398,14 @@ export function ThreadDetailView({
                 ? "This change was too large to apply automatically (the fix agent ran out of turns). Copy the brief below, open this PR's branch in Claude Code, and paste it to finish the change by hand. The daemon will not push this."
                 : "Not applied yet. Review the change, then “Approve & update description” updates the PR description. The reply below is approved separately. Or send a freeform instruction to revise it."}
           </Paragraph>
+          {detail.proposal.gateInconclusive && (
+            <Paragraph type="warning" style={{ fontSize: 12 }}>
+              The gate could not pass cleanly: the pre-existing typecheck/lint
+              errors it hit are in files this change did not touch. The fix itself
+              was verified as far as possible. Approving is an informed override —
+              it will push despite the dirty baseline.
+            </Paragraph>
+          )}
           {detail.proposal.kind === "manual_plan" ? (
             <Pre maxHeight={480}>{detail.proposal.planMarkdown}</Pre>
           ) : (

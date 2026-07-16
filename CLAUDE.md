@@ -123,20 +123,32 @@ npx tsx packages/server/src/cli.ts verdict <threadId>
 
 ## Applying changes to the running daemon
 
-The daemon runs from the Docker image: the built server plus the **prebuilt**
-`packages/web/dist` (served via `@fastify/static`) are baked into the image at
-build time — neither is bundled on the fly or bind-mounted. So any source change,
-frontend or backend, is invisible to the running container until you rebuild the
-image and recreate the container:
+The recommended run path is **native under launchd** (`npm run dev:server` via
+`tsx watch`), so a source change is picked up on the next restart — no image
+rebuild:
+
+```bash
+make restart   # kickstart the launchd agent (also picks up config.json changes)
+make logs      # tail stdout/stderr;  make status  for PID/last exit
+```
+
+`tsx watch` reloads backend source on save, but the launchd agent serves the
+**prebuilt** `packages/web/dist` (via `@fastify/static`), so a frontend change
+still needs `npm run build` + a hard browser refresh.
+
+For live UI work, `npm run dev:web` gives hot reload while proxying the API to a
+daemon — pair it with `npm run dev:server` (`tsx watch`) for a native dev loop
+against the same code.
+
+**Docker (alternative run path).** The image bakes in the built server plus the
+prebuilt `packages/web/dist` at build time — neither is bundled on the fly nor
+bind-mounted — so any source change is invisible to the running container until
+you rebuild the image and recreate the container:
 
 ```bash
 make docker-build     # rebuild the image with your changes
 make docker-restart   # recreate the container (compose up -d --force-recreate)
 ```
 
-Then hard-refresh the browser for a frontend change.
-
-For live UI work, skip Docker: `npm run dev:web` gives hot reload while proxying
-the API to a daemon — pair it with `npm run dev:server` (`tsx watch`) for a
-native dev loop against the same code. Boot persistence for the deployed daemon
-is handled by `restart: unless-stopped` in `docker-compose.yml`.
+Boot persistence for the container is handled by `restart: unless-stopped` in
+`docker-compose.yml`.

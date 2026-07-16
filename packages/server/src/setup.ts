@@ -43,6 +43,11 @@ function configPath(): string {
 
 const rl = createInterface({ input: stdin, output: stdout });
 
+/** Print a short "what this is / where to get it" blurb before a prompt. */
+function explain(lines: string[]): void {
+  stdout.write("\n" + lines.map((l) => `  ${l}`).join("\n") + "\n");
+}
+
 async function ask(label: string, fallback = ""): Promise<string> {
   const suffix = fallback ? ` [${fallback}]` : "";
   const answer = (await rl.question(`${label}${suffix}: `)).trim();
@@ -135,6 +140,12 @@ async function runSetup(): Promise<void> {
   );
 
   // GitHub token first (needed to resolve the login default).
+  explain([
+    "GitHub token — authorizes `gh api` calls AND raw `git push`/`clone`.",
+    "  What: a Personal Access Token with the `repo` scope.",
+    "  Get a classic PAT: https://github.com/settings/tokens/new?scopes=repo",
+    "  Already logged into the gh CLI? Paste the output of:  gh auth token",
+  ]);
   const ghToken = await askSecret("GitHub token (GH_TOKEN, repo scope)", process.env.GH_TOKEN);
   if (!ghToken) throw new Error("GitHub token is required.");
   process.stdout.write("  → validating GitHub token… ");
@@ -142,13 +153,24 @@ async function runSetup(): Promise<void> {
   console.log(`ok (login: ${detectedLogin})`);
 
   // KeySmith creds.
+  explain([
+    "KeySmith — mints short-lived AWS Bedrock tokens so the agent can call Claude.",
+    "  Create an API key on the *My Keys* page (the secret is shown ONCE):",
+    "    https://keysmith.int.tubi.io   (docs: https://keysmith.int.tubi.io/docs)",
+    "  You'll paste three things below: the URL, the key id, and the secret.",
+  ]);
   const ksUrl = await ask("KeySmith URL", process.env.KEYSMITH_URL || "https://keysmith.int.tubi.io");
-  const ksKeyId = await ask("KeySmith key id (KEYSMITH_KEY_ID)", process.env.KEYSMITH_KEY_ID);
+  const ksKeyId = await ask("KeySmith key id (KEYSMITH_KEY_ID, e.g. 01J...)", process.env.KEYSMITH_KEY_ID);
   if (!ksKeyId) throw new Error("KEYSMITH_KEY_ID is required.");
-  const ksSecret = await askSecret("KeySmith secret (KEYSMITH_SECRET)", process.env.KEYSMITH_SECRET);
+  const ksSecret = await askSecret("KeySmith secret (KEYSMITH_SECRET, e.g. btv_...)", process.env.KEYSMITH_SECRET);
   if (!ksSecret) throw new Error("KEYSMITH_SECRET is required.");
 
   // Config knobs.
+  explain([
+    "A couple of config values (written to config.json, editable later):",
+    "  githubLogin — your GitHub username; the agent skips your own comments.",
+    "  allowRepos  — which repos to babysit; blank = every PR you authored.",
+  ]);
   const githubLogin = await ask("Your GitHub login", detectedLogin);
   const allowReposRaw = await ask(
     "allowRepos (comma-separated owner/repo; blank = all authored PRs)",

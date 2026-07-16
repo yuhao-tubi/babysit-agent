@@ -9,6 +9,7 @@
   "ciLogsRoot": "~/.babysit-agent/cache/ci-logs",
   "maxThreadAttempts": 2,
   "maxGateFixAttempts": 2,
+  "maxProposalFiles": 5,
   "botLogins": [
     "Copilot",
     "copilot-pull-request-reviewer",
@@ -18,12 +19,14 @@
     "github-actions[bot]"
   ],
   "ignoreAuthors": ["tubi-laborador", "github-actions"],
-  "ignoreRepos": ["adRise/chatgpt-app"],
-  "allowRepos": ["adRise/www"],
+  "ignoreRepos": [],
+  "allowRepos": ["owner/repo"],
   "autoPushClasses": [],
   "bedrockModelName": "claude-opus",
+  "gitUserName": "your-github-login",
+  "gitUserEmail": "you@tubi.tv",
   "ci": {
-    "enabledRepos": ["www"],
+    "enabledRepos": [],
     "checkAllowlist": [
       { "pattern": "eslint", "class": "lint" },
       { "pattern": "lint", "class": "lint" },

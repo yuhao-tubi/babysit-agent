@@ -18,6 +18,17 @@ export interface GateOpts {
   ciClass?: CiClass;
   /** For unit-test fixes: the specific test the agent wants verified. */
   testTarget?: { file: string; nameFilter?: string };
+  /**
+   * Light mode: verify the DIFF, not the whole repo. Used by the apply/
+   * instruction path (owner-reviewed proposals), where a full monorepo build +
+   * whole-tree typecheck/lint is disproportionate to a small change. Runs an
+   * incremental app typecheck (relying on build artifacts seeded from the base
+   * clone) and lints only `changedFiles`. Not for CI-failure fixes — those keep
+   * the full gate so the failing check is genuinely re-run.
+   */
+  light?: boolean;
+  /** Repo-relative paths the proposal touched — scopes lint in light mode. */
+  changedFiles?: string[];
 }
 
 async function run(cmd: string, args: string[], cwd: string): Promise<{ ok: boolean; out: string }> {
@@ -58,6 +69,14 @@ export async function runGate(dir: string, repo: string, opts: GateOpts = {}): P
     const scripts = pkg.scripts ?? {};
     const hasYarn = existsSync(join(dir, "yarn.lock"));
     const runner = hasYarn ? "yarn" : "npm";
+
+    // Light mode (apply/instruction proposals): verify the diff, not the repo.
+    if (opts.light) {
+      const light = await runLightGate(dir, scripts, hasYarn, runner, opts.changedFiles ?? []);
+      if (light.ran) return light;
+      // Fall through to the full gate if we couldn't scope a light check.
+    }
+
     const required = ["typecheck", "lint"].filter((s) => scripts[s]);
 
     // build-class CI fix: the build script must also pass.
@@ -132,6 +151,128 @@ export async function runGate(dir: string, repo: string, opts: GateOpts = {}): P
   }
 
   return { ran: false, passed: false, detail: "no applicable check/validator found" };
+}
+
+/**
+ * Light gate for owner-reviewed proposals: confirm the diff still typechecks and
+ * lints, WITHOUT the whole-monorepo cost the full gate pays. Two scoped checks:
+ *
+ *  - Typecheck: prefer `typecheck-app` (the app's own `tsc --noEmit`) over the
+ *    umbrella `typecheck` (which fans out `lerna run typecheck` across every
+ *    package). It runs incrementally against the `.tsbuildinfo` + built
+ *    package `lib` dirs seeded into the worktree from the base clone — so it
+ *    needs no `pre-build` and re-checks only what changed. Falls to `typecheck`.
+ *  - Lint: run the linter on the CHANGED FILES only, not `src bin webpack`. A
+ *    reviewed proposal shouldn't be blocked by pre-existing lint elsewhere; the
+ *    executor's relatedness guard already assumes gate errors map to the diff.
+ *
+ * `pre-build` and the `lerna run typecheck/lint` fan-outs are deliberately
+ * skipped: the touched packages are already built (seeded), and unchanged
+ * packages don't need re-verifying for a `src/` diff. Returns ran=false when
+ * neither a typecheck nor a lint script is detectable — the caller then falls
+ * back to the full gate rather than silently passing an unverified change.
+ */
+async function runLightGate(
+  dir: string,
+  scripts: Record<string, string>,
+  hasYarn: boolean,
+  runner: string,
+  changedFiles: string[]
+): Promise<GateResult> {
+  const details: string[] = [];
+  let ranSomething = false;
+
+  // Monorepo cross-package staleness fix: the light gate typechecks the app
+  // against sibling packages' seeded `lib/*.d.ts` (from the base clone). When
+  // the diff itself changes a workspace package (e.g. adds an export to
+  // `@adrise/player`), those seeded `.d.ts` are STALE — `typecheck-app` then
+  // reports the PR's own new symbols as "missing" in files the diff didn't
+  // touch (a false failure that escalates as inconclusive). Rebuild ONLY the
+  // touched packages first (scoped, not the whole `pre-build` fan-out) so the
+  // app typechecks against fresh declarations. A rebuild failure is a real,
+  // in-diff signal — surface it as a gate failure.
+  const rebuilt = await rebuildChangedPackages(dir, hasYarn, runner, changedFiles);
+  if (rebuilt) {
+    ranSomething = true;
+    details.push(rebuilt.detail);
+    if (!rebuilt.ok) return { ran: true, passed: false, detail: details.join("\n---\n") };
+  }
+
+  const typecheckScript = ["typecheck-app", "typecheck"].find((s) => scripts[s]);
+  if (typecheckScript) {
+    ranSomething = true;
+    const args = hasYarn ? [typecheckScript] : ["run", typecheckScript];
+    const r = await run(runner, args, dir);
+    details.push(`${runner} ${typecheckScript} (light): ${r.ok ? "passed" : "FAILED"}\n${r.out}`);
+    if (!r.ok) return { ran: true, passed: false, detail: details.join("\n---\n") };
+  }
+
+  // Lint only the changed JS/TS files (the linter is a no-op on other types).
+  // Prefer a "base" lint script (bare `eslint` with NO baked-in paths) so the
+  // changed files become the sole positionals — `lint:main`/`lint` typically
+  // hardcode `src bin webpack`, where extra args APPEND rather than scope.
+  const lintFiles = changedFiles.filter((f) => /\.(?:[cm]?[jt]sx?)$/.test(f));
+  const lintScript = ["lint:base", "lint:main", "lint"].find((s) => scripts[s]);
+  if (lintFiles.length && lintScript) {
+    ranSomething = true;
+    // `<runner> <script> -- <files>` forwards the paths as eslint positionals,
+    // overriding the script's default `src bin webpack` scope.
+    const base = hasYarn ? [lintScript] : ["run", lintScript];
+    const r = await run(runner, [...base, "--", ...lintFiles], dir);
+    details.push(`${runner} ${lintScript} (light, ${lintFiles.length} file(s)): ${r.ok ? "passed" : "FAILED"}\n${r.out}`);
+    if (!r.ok) return { ran: true, passed: false, detail: details.join("\n---\n") };
+  }
+
+  return { ran: ranSomething, passed: ranSomething, detail: details.join("\n---\n") };
+}
+
+/**
+ * Rebuild the workspace packages the diff touched, scoped via `lerna run build
+ * --scope`. Maps each changed `packages/<dir>/…` path to that package's declared
+ * `name` (the lerna scope — a dir like `player` is package `@adrise/player`),
+ * keeps only packages that have their own `build` script, and rebuilds just
+ * those. Deliberately NOT the whole `pre-build` (`rm -rf build && lerna run
+ * build` over every package): that is the slow, all-packages fan-out we're
+ * avoiding. Returns null when the diff touches no buildable workspace package
+ * (nothing to rebuild — the app-only common case), so the caller skips it.
+ */
+async function rebuildChangedPackages(
+  dir: string,
+  hasYarn: boolean,
+  runner: string,
+  changedFiles: string[]
+): Promise<{ ok: boolean; detail: string } | null> {
+  // Collect the distinct `packages/<dir>` roots the diff touched.
+  const pkgDirs = new Set<string>();
+  for (const f of changedFiles) {
+    const m = /^packages\/([^/]+)\//.exec(f);
+    if (m) pkgDirs.add(m[1]);
+  }
+  if (!pkgDirs.size) return null;
+
+  // Resolve each dir to its package name, keeping only ones with a build script.
+  const scopes: string[] = [];
+  for (const d of pkgDirs) {
+    const pkgJson = join(dir, "packages", d, "package.json");
+    if (!existsSync(pkgJson)) continue;
+    try {
+      const pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
+      if (pkg?.name && pkg?.scripts?.build) scopes.push(pkg.name);
+    } catch {
+      // Unreadable package.json — skip; the whole-app typecheck still runs.
+    }
+  }
+  if (!scopes.length) return null;
+
+  // `lerna run build --scope <a> --scope <b>` filters to exactly those packages.
+  const lernaArgs = ["build"];
+  for (const s of scopes) lernaArgs.push("--scope", s);
+  const args = hasYarn ? ["lerna", "run", ...lernaArgs] : ["exec", "lerna", "run", ...lernaArgs];
+  const r = await run(runner, args, dir);
+  return {
+    ok: r.ok,
+    detail: `${runner} lerna run build --scope ${scopes.join(" ")} (${scopes.length} pkg): ${r.ok ? "passed" : "FAILED"}\n${r.out}`,
+  };
 }
 
 /**

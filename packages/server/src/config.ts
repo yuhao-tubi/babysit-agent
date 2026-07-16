@@ -32,6 +32,15 @@ export interface Config {
   maxThreadAttempts: number;
   /** Max times the fix agent re-runs to repair gate (lint/typecheck) errors it introduced, per fix. */
   maxGateFixAttempts: number;
+  /**
+   * Max files a proposed code change may touch (source + test + config, no
+   * exemptions) before it is deemed too large to apply autonomously. Over the
+   * limit, the fix is abandoned and the Thread pivots to a Manual plan (the
+   * copy-paste-into-Claude-Code handoff) instead of parking a Proposal. Keeps
+   * every auto-applied change an easy, reviewable fix. Also softly hinted to the
+   * fix agent so it bails early. Default 5.
+   */
+  maxProposalFiles: number;
   botLogins: string[];
   /**
    * Authors whose feedback is ignored entirely: no Verdict is run — the Thread is
@@ -89,6 +98,7 @@ const DEFAULTS: Config = {
   ciLogsRoot: join(homedir(), ".babysit-agent", "cache", "ci-logs"),
   maxThreadAttempts: 2,
   maxGateFixAttempts: 2,
+  maxProposalFiles: 5,
   botLogins: [
     "Copilot",
     "copilot-pull-request-reviewer",
@@ -107,8 +117,10 @@ const DEFAULTS: Config = {
   // profile. This selects which inference-profile ARN to invoke; see keysmith.ts.
   bedrockModelName: "claude-opus",
   ci: {
-    // Per-repo opt-in. Scoped to www for now (a JS/TS repo whose gate we know).
-    enabledRepos: ["www"],
+    // Per-repo opt-in. Empty = CI babysitting OFF everywhere — the current
+    // default while the CI-failure workflow is rebuilt. The allowlist below is
+    // kept as documentation and so re-enabling a repo is a one-key change.
+    enabledRepos: [],
     checkAllowlist: [
       { pattern: "eslint", class: "lint" },
       { pattern: "lint", class: "lint" },

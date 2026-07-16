@@ -219,6 +219,13 @@ export interface Proposal {
   baseSha: string;
   /** Whether the build-time gate passed (proposals are only parked when it did). */
   gatePassed: boolean;
+  /**
+   * Set when the gate did NOT pass cleanly, but every failure was in files the
+   * fix did not touch (pre-existing/unrelated errors — e.g. a dirty monorepo
+   * baseline). The proposal is still parked for the owner: Approve is an informed
+   * override of the inconclusive gate. Never auto-pushed (see `mayAutoPush`).
+   */
+  gateInconclusive?: boolean;
   /** For `code`: the unified git diff to apply+push. */
   diff?: string;
   /** For `pr_body`: the full rewritten PR description to apply via `gh pr edit`. */
