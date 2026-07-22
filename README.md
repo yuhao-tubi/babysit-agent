@@ -31,8 +31,8 @@ is documented next as an alternative.
 
 ## Alternative: Docker
 
-The image bundles the whole runtime — Node 22, `gh`, `git`, `yarn`, and
-Playwright Chromium — plus the prebuilt dashboard. **`./.data/` is the single
+The image bundles the whole runtime — Node 22, `gh`, `git`, `yarn` — plus the
+prebuilt dashboard. **`./.data/` is the single
 source of truth**, tiered by how expensive each thing is to rebuild:
 
 ```

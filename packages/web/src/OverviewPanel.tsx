@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Input, Modal, Space, Spin, Tag, Typography, message } from "antd";
+import { Alert, Button, Input, Space, Spin, Tag, Typography, message } from "antd";
 import {
   FileTextOutlined,
   GithubOutlined,
@@ -72,20 +72,8 @@ export function OverviewPanel({
   };
 
   const generate = () => {
-    // Regenerate throws away the whole artifact — warn if the owner hand-edited
-    // a diagram, since those edits are the durable truth until they Regenerate.
-    if (ov?.diagramsEditedAt) {
-      Modal.confirm({
-        title: "Discard your manual diagram edits?",
-        content:
-          "You've edited and saved a diagram. Regenerating runs the agent from scratch and replaces all canvases — your manual edits will be lost.",
-        okText: "Regenerate (discard edits)",
-        okButtonProps: { danger: true },
-        cancelText: "Keep my edits",
-        onOk: runGenerate,
-      });
-      return;
-    }
+    // Diagrams are read-only (regenerate to refresh) — no manual edits to warn
+    // about, so Regenerate runs straight away.
     void runGenerate();
   };
 
@@ -166,7 +154,7 @@ export function OverviewPanel({
           type="error"
           showIcon
           message="Overview generation failed"
-          description="No usable output, or the diagram renderer is unavailable (run `make setup-render` to install Chromium). Try Regenerate."
+          description="Generation did not produce usable output. Try Regenerate."
           style={{ marginBottom: 8 }}
         />
       )}
@@ -189,7 +177,7 @@ export function OverviewPanel({
 
       {ov?.overviewMd && (
         <>
-          {hasDiagrams && <DiagramSet prKey={prKey} diagrams={ov.diagrams} />}
+          {hasDiagrams && <DiagramSet diagrams={ov.diagrams} />}
           <Markdown>{ov.overviewMd}</Markdown>
 
           {/* Risk analysis. Reviewer PRs: Verified risks produced by the same

@@ -136,17 +136,18 @@ function migrate(d: Database.Database): void {
   };
   addPrCol("overview_md", "TEXT");
   addPrCol("diagram_path", "TEXT");
-  // `diagrams_json` holds the 4W1H diagram set. It now stores a MAP of raw
-  // Excalidraw docs keyed by section ({why?,what?,how?}) — authored by the agent
-  // and rendered/edited client-side via @excalidraw/excalidraw. (Superseded the
-  // React-Flow DiagramSpec[] payload; the column is reused, the shape changed.)
+  // `diagrams_json` holds the 4W1H diagram set: a MAP of read-only SVG diagrams
+  // keyed by section ({why?,what?,how?}), each `{ svg }` authored by the agent in
+  // one pass and rendered inline (see issue #1). (The column has been reused
+  // across shapes — React-Flow DiagramSpec[], then Excalidraw docs, now SVG — so
+  // `parseDiagrams` drops any legacy payload that isn't the current shape.)
   addPrCol("diagrams_json", "TEXT");
   addPrCol("overview_head_sha", "TEXT");
   addPrCol("overview_status", "TEXT");
   addPrCol("overview_generated_at", "TEXT");
-  // Set when the OWNER hand-edits + Saves a canvas from the dashboard. Gates the
-  // "Regenerate discards your manual edits" warning and suppresses the head-SHA
-  // staleness nag once the owner has taken ownership of the artifact.
+  // LEGACY: was set when the owner hand-edited a diagram canvas. Diagrams are now
+  // read-only (issue #1), so nothing reads or writes this; the column add is kept
+  // (additive migrations never drop columns) but is dead. Do not reuse.
   addPrCol("diagrams_edited_at", "TEXT");
   // Discovery role: "author" (you wrote it — full pipeline) or "reviewer"
   // (you're a requested reviewer — OVERVIEW-ONLY, never enters verdict/gate/push).
@@ -629,14 +630,12 @@ export interface PrOverview {
   headSha: string | null;
   /** The 4W1H overview markdown, or null if never generated. */
   overviewMd: string | null;
-  /** The 4W1H diagram set — Excalidraw canvases keyed by section ({} if none). */
+  /** The 4W1H diagram set — read-only SVG diagrams keyed by section ({} if none). */
   diagrams: DiagramSet;
   /** Head sha the artifact was built against (staleness signal). */
   overviewHeadSha: string | null;
   overviewStatus: OverviewStatus;
   overviewGeneratedAt: string | null;
-  /** When the owner last hand-edited+saved a canvas (null = never). */
-  diagramsEditedAt: string | null;
   /**
    * Risk analysis: Verified risks (reviewer PRs) or author Blind spots — the same
    * merged RiskItem[] storage ([] if none/failed). Role drives which was produced.
@@ -659,16 +658,25 @@ export interface PrOverview {
 }
 
 /**
- * Parse the stored diagram JSON into a section→ExcalidrawDoc map, tolerating
- * null/corrupt values AND the legacy React-Flow `DiagramSpec[]` payload (which
- * we simply drop — an array is not the new map shape).
+ * Parse the stored diagram JSON into a section→DiagramDoc map, tolerating
+ * null/corrupt values and legacy payloads. Each entry must be an object with a
+ * string `svg` (the current shape); anything else — an array (legacy React-Flow
+ * `DiagramSpec[]`), or a legacy Excalidraw `{type,elements}` doc — is dropped, so
+ * an old row simply reads back with no diagrams until it is regenerated.
  */
 function parseDiagrams(json: unknown): DiagramSet {
   if (typeof json !== "string" || !json.trim()) return {};
   try {
     const obj = JSON.parse(json);
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
-    return obj as DiagramSet;
+    const out: DiagramSet = {};
+    for (const [section, doc] of Object.entries(obj as Record<string, unknown>)) {
+      if (section !== "why" && section !== "what" && section !== "how") continue;
+      if (doc && typeof doc === "object" && typeof (doc as any).svg === "string") {
+        out[section] = { svg: (doc as any).svg };
+      }
+    }
+    return out;
   } catch {
     return {};
   }
@@ -690,7 +698,6 @@ function rowToOverview(r: any): PrOverview {
     overviewHeadSha: r.overview_head_sha ?? null,
     overviewStatus: (r.overview_status as OverviewStatus) ?? "idle",
     overviewGeneratedAt: r.overview_generated_at ?? null,
-    diagramsEditedAt: r.diagrams_edited_at ?? null,
     risks: parseRisks(r.risks_json),
     risksStatus: (r.risks_status as RiskStatus) ?? null,
     risksHeadSha: r.risks_head_sha ?? null,
@@ -715,7 +722,6 @@ export function updatePrOverview(
     overviewHeadSha: string | null;
     overviewStatus: OverviewStatus;
     overviewGeneratedAt: string | null;
-    diagramsEditedAt: string | null;
     risks: RiskItem[] | null;
     risksStatus: RiskStatus | null;
     risksHeadSha: string | null;
@@ -730,7 +736,6 @@ export function updatePrOverview(
     overviewHeadSha: "overview_head_sha",
     overviewStatus: "overview_status",
     overviewGeneratedAt: "overview_generated_at",
-    diagramsEditedAt: "diagrams_edited_at",
     risks: "risks_json",
     risksStatus: "risks_status",
     risksHeadSha: "risks_head_sha",

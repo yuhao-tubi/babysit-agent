@@ -41,11 +41,6 @@ deps: ## Install all workspace dependencies
 build: ## Build backend + frontend for production
 	npm run build
 
-.PHONY: setup-render
-setup-render: ## Install Chromium for the Excalidraw diagram renderer (one-time)
-	npx playwright install chromium
-	@echo "Chromium installed for Playwright — PR-overview diagram rendering is ready."
-
 # ---------------------------------------------------------------------------
 # Docker (self-contained image; ./.data is bind-mounted to /data)
 # ---------------------------------------------------------------------------

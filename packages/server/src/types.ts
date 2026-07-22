@@ -23,29 +23,25 @@ export type CiClass = "lint" | "typecheck" | "build" | "unit_test";
 export type DiagramSection = "why" | "what" | "how";
 
 /**
- * A raw Excalidraw document — the `.excalidraw` file shape (`type:"excalidraw"`,
- * `elements`, `appState`, `files`). The overview agent AUTHORS these directly
- * (coordinates and all), self-correcting via the render loop; the dashboard
- * mounts them in an editable `@excalidraw/excalidraw` canvas. We keep it loosely
- * typed — the durable truth is whatever Excalidraw reads/writes, and we only
- * validate the wrapper (`type` + non-empty `elements`) before persisting.
+ * A PR-overview diagram: a single self-contained, sanitized `<svg>` string the
+ * overview agent authors in ONE pass (no render loop). The agent picks whatever
+ * shape best teaches the idea (two pipelines, before/after, fan-out, timeline);
+ * the freedom of raw SVG is the point (a fixed grammar like Mermaid cannot
+ * express it). The `svg` has passed `sanitizeSvg` — it is well-formed and has no
+ * script/handler/foreignObject/external-ref XSS surface — so the dashboard can
+ * render it inline (read-only). See issue #1.
  */
-export interface ExcalidrawDoc {
-  type: "excalidraw";
-  version?: number;
-  source?: string;
-  elements: unknown[];
-  appState?: Record<string, unknown>;
-  files?: Record<string, unknown>;
+export interface DiagramDoc {
+  svg: string;
 }
 
 /**
- * The PR-overview diagram artifact: up to one editable Excalidraw canvas per
- * 4W1H section. Replaces the old abstract React-Flow `DiagramSpec[]`. A section
- * is present only if the agent produced (and the render loop validated) a canvas
- * for it; a trivial PR can have an empty map.
+ * The PR-overview diagram artifact: up to one SVG diagram per 4W1H section. A
+ * section is present only if the agent produced a diagram for it AND it passed
+ * sanitization; a trivial PR (or a section that fails validation twice) can be
+ * absent, and the prose overview stands on its own.
  */
-export type DiagramSet = Partial<Record<DiagramSection, ExcalidrawDoc>>;
+export type DiagramSet = Partial<Record<DiagramSection, DiagramDoc>>;
 
 /** Severity vocabulary for a Risk — reuses the Verdict `risk` levels. */
 export type RiskLevel = "low" | "medium" | "high";

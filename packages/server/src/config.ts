@@ -143,9 +143,9 @@ const DEFAULTS: Config = {
   },
   overview: {
     enabled: true,
-    // A PR-wide investigation PLUS authoring up to three Excalidraw canvases,
-    // each through a write→render→view→fix loop (2–4 iterations). That loop is
-    // turn-hungry, so the budget is well above the old prose-only 60.
+    // A PR-wide investigation PLUS authoring up to three SVG diagrams in one pass
+    // each, PLUS (reviewer PRs) the finder→confirmer risk analysis in the same
+    // budget. Generous so a large PR's investigation + repair retry all fit.
     maxTurns: 150,
     // Reviewer-facing read-only artifacts run on sonnet for speed; author work
     // and the push path stay on bedrockModelName (opus). See OverviewConfig.

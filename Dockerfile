@@ -1,7 +1,7 @@
 # PR Babysitting Agent — self-contained image.
 #
-# Bundles the whole runtime (Node 22, gh, git, yarn, Playwright Chromium) and
-# the prebuilt dashboard. State + creds live in a bind-mounted data dir at
+# Bundles the whole runtime (Node 22, gh, git, yarn) and the prebuilt
+# dashboard. State + creds live in a bind-mounted data dir at
 # /data (host ./.data — see docker-compose.yml / README): /data/.env,
 # /data/config.json, and heavy churny state (db, repo clones, worktrees,
 # ci-logs) directly under /data — no extra nesting.
@@ -33,13 +33,6 @@ COPY package.json package-lock.json ./
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 RUN npm ci
-
-# Playwright Chromium + its system libraries (Excalidraw overview renderer).
-# Install to a world-readable path so the daemon still finds it after the
-# entrypoint optionally drops to a non-root PUID (see entrypoint.sh).
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN npx playwright install --with-deps chromium \
-  && chmod -R a+rX /opt/ms-playwright
 
 # Source + build (server dist + web dist).
 COPY . .

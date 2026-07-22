@@ -6,36 +6,38 @@ import { addWorktree, removeWorktree } from "./worktrees.js";
 import { getPrHead } from "./gh.js";
 import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
 import type { PrOverview } from "./db.js";
-import type { DiagramSection, DiagramSet, ExcalidrawDoc, RiskItem } from "./types.js";
+import type { DiagramSection, DiagramSet, RiskItem } from "./types.js";
 import { isIgnoredRepo } from "./classify.js";
 import { repoQueue } from "./queue.js";
 import { emit } from "./events.js";
-import { assetsDir, renderCliCommand, chromiumAvailable, ChromiumMissingError } from "./render.js";
+import { assetsDir } from "./render.js";
+import { sanitizeSvg } from "./svg.js";
 import { analyzeRisks } from "./risks.js";
 
 /**
- * PR-level overview + EXCALIDRAW DIAGRAM SET — a Session-level artifact that
- * lives OUTSIDE the Thread/Verdict lifecycle. On-demand, read-only w.r.t. GitHub
- * (so `dryRun` does not gate it); the only persistence is the DB.
+ * PR-level overview + SVG DIAGRAM SET — a Session-level artifact that lives
+ * OUTSIDE the Thread/Verdict lifecycle. On-demand, read-only w.r.t. GitHub (so
+ * `dryRun` does not gate it); the only persistence is the DB.
  *
- * One agent investigation produces the prose overview AND up to three editable
- * Excalidraw canvases (one per 4W1H section). The agent AUTHORS the `.excalidraw`
- * JSON directly — coordinates, shapes, colors — and self-corrects via a
- * write→render→view→fix loop: it writes a canvas to disk, runs the in-package TS
- * renderer (headless Chromium) to a PNG, Reads the PNG back, critiques its own
- * image, and edits until the layout is clean. It has NO GitHub/push tools (the
- * read-only-w.r.t.-GitHub guarantee is preserved); `Write` only touches the
- * ephemeral worktree.
+ * One agent investigation produces the prose overview AND up to three diagrams
+ * (one per 4W1H section). The agent AUTHORS a self-contained `<svg>` per section
+ * in a SINGLE pass — no render loop, no headless browser. Diagram quality is
+ * front-loaded via a vendored authoring skill (design system + spacing rules)
+ * rather than an expensive write→render→view→fix loop. The agent has NO
+ * GitHub/push tools (the read-only-w.r.t.-GitHub guarantee is preserved); `Write`
+ * only touches the ephemeral worktree.
  *
- * Delivery contract: the agent writes canvases to FIXED paths in the worktree
- * (`overview/{why,what,how}.excalidraw` + `overview/overview.json` for the prose
- * + which sections it finalized). The server reads those files back after the
- * agent returns — the verbose JSON never round-trips through the token stream.
+ * Delivery contract: the agent writes diagrams to FIXED paths in the worktree
+ * (`overview/{why,what,how}.svg` + `overview/overview.json` for the prose + which
+ * sections it finalized). The server reads those files back, SANITIZES each SVG
+ * (see `sanitizeSvg` — the SVG is rendered inline in the dashboard, so untrusted
+ * markup is an XSS surface), and drops any that fail validation. Verbose markup
+ * never round-trips through the token stream.
  *
- * The agent learns the Excalidraw authoring methodology from VENDORED skill docs
- * (methodology.md / element-templates.md / json-schema.md / color-palette.md in
- * overview-assets/), which it Reads by absolute path. The sandbox stays sealed
- * (`settingSources: []`) — no skill auto-discovery, no target-repo `.claude`.
+ * The agent learns the SVG authoring methodology from VENDORED skill docs
+ * (svg-methodology.md / svg-templates.md / color-palette.md in overview-assets/),
+ * which it Reads by absolute path. The sandbox stays sealed (`settingSources:
+ * []`) — no skill auto-discovery, no target-repo `.claude`.
  */
 
 const SECTIONS: DiagramSection[] = ["why", "what", "how"];
@@ -43,59 +45,48 @@ const SECTIONS: DiagramSection[] = ["why", "what", "how"];
 /** Fixed worktree-relative paths the agent writes and the server reads back. */
 const OUTPUT_DIR = "overview";
 const overviewJsonPath = (dir: string) => join(dir, OUTPUT_DIR, "overview.json");
-const sectionCanvasPath = (dir: string, s: DiagramSection) =>
-  join(dir, OUTPUT_DIR, `${s}.excalidraw`);
+const sectionSvgPath = (dir: string, s: DiagramSection) =>
+  join(dir, OUTPUT_DIR, `${s}.svg`);
 
 function buildSystemPrompt(role: "author" | "reviewer", wtDir: string): string {
   const dir = assetsDir();
-  const methodology = join(dir, "methodology.md");
-  const templates = join(dir, "element-templates.md");
-  const schema = join(dir, "json-schema.md");
+  const methodology = join(dir, "svg-methodology.md");
+  const templates = join(dir, "svg-templates.md");
   const palette = join(dir, "color-palette.md");
-  const renderCmd = renderCliCommand();
   // ABSOLUTE output paths — the agent has misresolved bare relative paths
   // against a hallucinated base before, writing outside the worktree so the
   // server read back nothing. Pin the exact directory it must write into.
   const outDir = join(wtDir, OUTPUT_DIR);
 
-  return `You produce a PR OVERVIEW and up to THREE editable Excalidraw diagram canvases (one per 4W1H section: Why / What / How) for a pull request. You work in a read-only checkout of the PR branch. Investigate the ACTUAL code before deciding — never guess.
+  return `You produce a PR OVERVIEW and up to THREE diagrams (one per 4W1H section: Why / What / How) for a pull request. You work in a read-only checkout of the PR branch. Investigate the ACTUAL code before deciding — never guess.
 
 # Step 1 — Investigate (grounded)
 1. Read the PR diff (\`git diff origin/master...HEAD\` or \`git show\`), identify the CORE changed files, then GREP/GLOB the checkout to trace what DEPENDS ON the changed symbols — the "blast radius" of files AFFECTED but not themselves edited. This trace is the analytical value you add over a raw diff; do it.
 2. Break the PR down with 4W1H (Why / What / How). This drives both the prose and the diagrams.
 
 # Step 2 — Learn the diagram methodology
-You author Excalidraw \`.excalidraw\` JSON directly (coordinates, shapes, colors). BEFORE drawing, READ these vendored references by absolute path:
-- Methodology (how to make a diagram ARGUE, visual patterns, the render loop): ${methodology}
-- Element JSON templates (copy-paste shapes): ${templates}
-- JSON schema (element fields): ${schema}
+Each diagram is a self-contained \`<svg>\` you author DIRECTLY as SVG markup (shapes, coordinates, text). BEFORE drawing, READ these vendored references by absolute path:
+- Methodology (how to make a diagram ARGUE, visual patterns, the CRITICAL spacing rules that keep a one-shot layout clean): ${methodology}
+- SVG element templates (copy-paste shapes: boxes, labels, arrows/markers, groups): ${templates}
 - Color palette (the dashboard's semantic colors — the SINGLE source of truth for color): ${palette}
 
-# Step 3 — Draw a canvas per section that earns one
-Produce a diagram for a section ONLY when that idea genuinely has ≥3 things worth relating. PREFER to give the "Why" section a diagram — a picture of the PROBLEM (before→after, cause→effect, the broken flow) teaches the reader's biggest question far better than prose. Diagrams are FREE-FORM: a node can be a code file, a concept, a problem, a state, a data shape, an actor, or a step. Pick the visual pattern that best teaches each idea (before/after, fan-out, timeline, tree, state machine, UML, etc. — see the methodology). Use real symbol/file/state names, not "Component A". A trivial PR (pure config/text) can have zero canvases.
+# Step 3 — Draw a diagram per section that earns one
+Produce a diagram for a section ONLY when that idea genuinely has ≥3 things worth relating. PREFER to give the "Why" section a diagram — a picture of the PROBLEM (before→after, cause→effect, the broken flow) teaches the reader's biggest question far better than prose. Diagrams are FREE-FORM: a node can be a code file, a concept, a problem, a state, a data shape, an actor, or a step. Pick the visual pattern that best teaches each idea (before/after, two side-by-side pipelines, fan-out, timeline, tree, state machine, etc. — see the methodology). Use real symbol/file/state names, not "Component A". A trivial PR (pure config/text) can have zero diagrams.
 
-Write each canvas you produce to a FIXED ABSOLUTE path (write to these EXACT paths — do NOT invent a different directory):
-- Why  → ${join(outDir, "why.excalidraw")}
-- What → ${join(outDir, "what.excalidraw")}
-- How  → ${join(outDir, "how.excalidraw")}
-Each file MUST be a complete Excalidraw document: \`{"type":"excalidraw","version":2,"source":"babysit-agent","elements":[...],"appState":{"viewBackgroundColor":"#ffffff"},"files":{}}\`.
+You author each SVG in ONE pass — there is NO render step and you will NOT see it rendered. This is why the METHODOLOGY'S SPACING RULES are load-bearing: follow them exactly (minimum gaps between boxes, non-overlapping placement, text that fits its box, a viewBox large enough for everything incl. any legend). Compute coordinates carefully; a sloppy layout ships as-is.
 
-# Step 4 — Render → view → fix loop (MANDATORY, per canvas)
-You CANNOT judge a diagram from JSON alone. For EACH canvas you write, run this loop (2–4 iterations is normal):
-1. Render it to PNG:
-   \`${renderCmd} <absolute-path-to-the-.excalidraw-file>\`
-   (it prints the PNG path and prints \`WxH\`; the PNG is written next to the file).
-2. Use the Read tool on that PNG to actually SEE it.
-3. Audit for defects: overlapping shapes/text, text clipped by its container, arrows crossing elements or landing on the wrong shape, uneven spacing, unreadable text, lopsided composition. Compare against the idea you meant to teach.
-4. Fix by editing the JSON (adjust x/y, widen containers, re-route arrows via extra points, resize), then re-render and re-view.
-5. Stop when it's clean and balanced — something you'd show without caveats.
+Write each diagram you produce to a FIXED ABSOLUTE path (write to these EXACT paths — do NOT invent a different directory):
+- Why  → ${join(outDir, "why.svg")}
+- What → ${join(outDir, "what.svg")}
+- How  → ${join(outDir, "how.svg")}
+Each file MUST be a single self-contained SVG document: it starts with \`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 W H">\`, contains only static shapes/text/markers, and ends with \`</svg>\`. HARD CONSTRAINTS (the server rejects a diagram that violates these): the root element is \`<svg>\`; there is a \`viewBox\`; NO \`<script>\`, NO \`<foreignObject>\`, NO \`on*\` event attributes, NO external/\`javascript:\` URLs (in-document \`#id\` references for markers/gradients are fine).
 
-# Step 5 — Write the prose + manifest
+# Step 4 — Write the prose + manifest
 Write ${join(outDir, "overview.json")} (this EXACT absolute path) as EXACTLY this JSON object:
 {
   "summary": "<one sentence: what this PR does>",
   "overview_md": "<the markdown overview — see structure below>",
-  "sections": [<the subset of "why","what","how" for which you wrote a rendered, verified canvas>]
+  "sections": [<the subset of "why","what","how" for which you wrote an SVG diagram>]
 }
 
 OVERVIEW_MD STRUCTURE — concise BULLETS over paragraphs. These three \`##\` headings are required, the rest optional:
@@ -107,9 +98,9 @@ What is included and its impact — the core files/behaviors that carry the chan
 How it works — the relationship between the CHANGED files and the AFFECTED (traced-by-grep) code. If nothing depends on the change, say so.
 
 # Rules
-- Work efficiently within your turn budget: investigate, then draw+render+fix each canvas. Don't explore exhaustively once the shape and blast radius are clear.
+- Work efficiently within your turn budget: investigate, then author each SVG carefully in one pass. Don't explore exhaustively once the shape and blast radius are clear.
 - You have Read/Grep/Glob/Bash and Write. Write ONLY the files under ${outDir}/ (that exact absolute directory) — never edit the target repo's source, and never write to any other directory. You have NO ability to push or post to GitHub; this is a read-only investigation.
-- Your FINAL text message should just name which section canvases you finalized (e.g. "Wrote why + how canvases; what was trivial"). The durable output is the FILES, not your message.`;
+- Your FINAL text message should just name which section diagrams you finalized (e.g. "Wrote why + how diagrams; what was trivial"). The durable output is the FILES, not your message.`;
 }
 
 function buildPrompt(pr: PrOverview, wtDir: string): string {
@@ -119,33 +110,89 @@ function buildPrompt(pr: PrOverview, wtDir: string): string {
     `Title: ${pr.title}`,
     `Branch: ${pr.headRef}`,
     "",
-    `Your working directory (cwd) is ${wtDir} — a read-only checkout of the PR head. Create the directory ${outDir} (\`mkdir -p ${outDir}\`), then follow your system instructions: investigate the diff, draw a rendered+verified Excalidraw canvas for each section that earns one, and write ${join(outDir, "overview.json")}. Write ALL output files to that exact ${outDir} directory — never to any other path.`,
+    `Your working directory (cwd) is ${wtDir} — a read-only checkout of the PR head. Create the directory ${outDir} (\`mkdir -p ${outDir}\`), then follow your system instructions: investigate the diff, author a self-contained SVG diagram for each section that earns one, and write ${join(outDir, "overview.json")}. Write ALL output files to that exact ${outDir} directory — never to any other path.`,
   ].join("\n");
 }
 
 /**
- * Validate a parsed value as an Excalidraw document (the wrapper check the
- * renderer also enforces). Returns the doc or null.
+ * Repair prompt for the ONE text-only fix attempt: name each section whose SVG
+ * failed sanitization and the concrete reason, and ask the agent to rewrite just
+ * those files to the same paths. Purely mechanical (no re-investigation) — the
+ * goal is a valid, safe SVG, not a better diagram.
  */
-function asExcalidrawDoc(raw: unknown): ExcalidrawDoc | null {
-  if (!raw || typeof raw !== "object") return null;
-  const o = raw as any;
-  if (o.type !== "excalidraw" || !Array.isArray(o.elements) || o.elements.length === 0) {
-    return null;
+function buildRepairPrompt(
+  wtDir: string,
+  invalid: { section: DiagramSection; errors: string[] }[]
+): string {
+  const outDir = join(wtDir, OUTPUT_DIR);
+  const lines = invalid.map(
+    (iv) => `- ${join(outDir, `${iv.section}.svg`)} — rejected because: ${iv.errors.join("; ")}`
+  );
+  return [
+    "Some diagram SVG files you wrote were REJECTED by the validator and were dropped.",
+    "Rewrite ONLY these files, to the SAME absolute paths, fixing the stated problem:",
+    ...lines,
+    "",
+    "Requirements for each rewritten file (the validator enforces these):",
+    '- The root element is `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 W H">` and the file ends with `</svg>`.',
+    "- It has a viewBox and at least one shape.",
+    "- NO `<script>`, NO `<foreignObject>`, NO `on*` attributes, NO external or `javascript:` URLs (in-document `#id` refs are fine).",
+    "Do not change overview.json and do not touch any other file. Your final message just says you rewrote them.",
+  ].join("\n");
+}
+
+/**
+ * Drive one read-only overview/repair agent turn to completion. The durable
+ * output is the files on disk; we only capture the terminal result subtype (for
+ * diagnostics when nothing was written). Read/Grep/Glob/Bash + Write, no gh/push.
+ */
+async function runOverviewAgent(opts: {
+  prompt: string;
+  systemPrompt: string;
+  dir: string;
+  env: Record<string, string>;
+  modelArn: string;
+  maxTurns: number;
+  trace: (obj: unknown) => void;
+}): Promise<string> {
+  let endSubtype = "";
+  for await (const msg of query({
+    prompt: opts.prompt,
+    options: {
+      cwd: opts.dir,
+      model: opts.modelArn,
+      systemPrompt: opts.systemPrompt,
+      permissionMode: "dontAsk",
+      // Write lets the agent author `.svg` + overview.json in the ephemeral
+      // worktree. It has NO gh/push tool — GitHub stays untouched.
+      allowedTools: ["Read", "Grep", "Glob", "Bash", "Write"],
+      settingSources: [],
+      env: opts.env,
+      maxTurns: opts.maxTurns,
+      stderr: (s: string) => opts.trace({ type: "stderr", text: s }),
+    },
+  })) {
+    opts.trace(msg);
+    if (msg.type === "result") endSubtype = msg.subtype;
   }
-  return o as ExcalidrawDoc;
+  return endSubtype;
 }
 
 /**
  * Read the agent's output files back from the worktree: the prose manifest
- * (overview.json) and each section canvas it declared. A canvas that is missing
- * or malformed is simply dropped (graceful degradation) — with the "diagrams are
- * the point" failure model applied by the caller.
+ * (overview.json) and each section SVG present. Every SVG is run through
+ * `sanitizeSvg` (well-formedness + XSS strip) before it is accepted — the SVG is
+ * rendered inline in the dashboard, so an unsanitized string is a live XSS
+ * surface. A section is reported in `invalid` (with the concrete errors) when its
+ * file exists but fails sanitization, so the caller can offer the agent ONE
+ * text-only repair attempt. A missing file is simply absent (graceful
+ * degradation — the prose overview stands on its own).
  */
-function collectFromWorktree(dir: string): {
+export function collectFromWorktree(dir: string): {
   summary: string;
   overviewMd: string;
   diagrams: DiagramSet;
+  invalid: { section: DiagramSection; errors: string[] }[];
 } | null {
   const manifestPath = overviewJsonPath(dir);
   if (!existsSync(manifestPath)) return null;
@@ -159,33 +206,29 @@ function collectFromWorktree(dir: string): {
     return null;
   }
 
-  const declared: DiagramSection[] = Array.isArray(manifest.sections)
-    ? manifest.sections.filter((s: unknown): s is DiagramSection =>
-        (SECTIONS as string[]).includes(s as string)
-      )
-    : [];
-
   const diagrams: DiagramSet = {};
-  // Read declared sections first; also opportunistically pick up any canvas file
-  // present but not declared (the agent may have forgotten to list it).
+  const invalid: { section: DiagramSection; errors: string[] }[] = [];
+  // Opportunistically read every section SVG present on disk (independent of the
+  // manifest's `sections` list — the agent may forget to list one it wrote).
   for (const s of SECTIONS) {
-    if (declared.length && !declared.includes(s)) {
-      // Still try the file — but only add if it exists and is valid.
-    }
-    const p = sectionCanvasPath(dir, s);
+    const p = sectionSvgPath(dir, s);
     if (!existsSync(p)) continue;
+    let raw: string;
     try {
-      const doc = asExcalidrawDoc(JSON.parse(readFileSync(p, "utf8")));
-      if (doc) diagrams[s] = doc;
+      raw = readFileSync(p, "utf8");
     } catch {
-      /* skip malformed canvas */
+      continue;
     }
+    const r = sanitizeSvg(raw);
+    if (r.ok) diagrams[s] = { svg: r.svg };
+    else invalid.push({ section: s, errors: r.errors });
   }
 
   return {
     summary: String(manifest.summary ?? ""),
     overviewMd: manifest.overview_md,
     diagrams,
+    invalid,
   };
 }
 
@@ -204,22 +247,17 @@ export interface OverviewResult {
  * Run the read-only overview investigation for a PR and persist the artifact.
  * Performs NO GitHub writes.
  *
- * Failure model (Q12=B → Q13=A): the diagrams are the POINT, so there is no
- * silent "prose-only" degradation. Missing Chromium ⇒ hard `failed` with an
- * actionable message BEFORE spending an agent run. A run that yields no usable
- * overview manifest ⇒ `failed`. The daemon is never crashed — the caller records
- * `failed` on the row.
+ * Failure model: the PROSE overview is the floor and must survive — a run that
+ * yields no usable overview manifest ⇒ `failed`. Diagrams are best-effort
+ * enrichment: each authored SVG must pass sanitization; one that fails gets ONE
+ * text-only repair attempt, then is dropped (the prose overview still ships
+ * `ready`). No headless browser is involved. The daemon is never crashed — the
+ * caller records `failed` on the row.
  */
 export async function generateOverview(prKey: string): Promise<OverviewResult> {
   const pr = getPrOverview(prKey);
   if (!pr) throw new Error(`no PR ${prKey}`);
   const cfg = loadConfig();
-
-  // Q13: the render loop is load-bearing — fail loudly up front if the renderer
-  // can't run, rather than producing a diagram-less overview and lying "ready".
-  if (!(await chromiumAvailable())) {
-    throw new ChromiumMissingError("required for PR-overview diagram rendering");
-  }
 
   const head = await getPrHead(pr.owner, pr.repo, pr.number);
   // A PR-unique worktree namespace (negative so it never collides with a real
@@ -231,8 +269,6 @@ export async function generateOverview(prKey: string): Promise<OverviewResult> {
     skipDeps: true,
   });
   try {
-    let last = "";
-    let endSubtype = "";
     // Reviewer overviews are read-only, reviewer-facing artifacts → sonnet for
     // speed. Author overviews stay on the default (opus). See OverviewConfig.
     const { env, modelArn } = await sdkEnv(
@@ -245,30 +281,18 @@ export async function generateOverview(prKey: string): Promise<OverviewResult> {
     const trace = (obj: unknown) => {
       if (tracePath) appendFileSync(tracePath, JSON.stringify(obj) + "\n");
     };
-    for await (const msg of query({
-      prompt: buildPrompt(pr, dir),
-      options: {
-        cwd: dir,
-        model: modelArn,
-        systemPrompt: buildSystemPrompt(pr.role, dir),
-        permissionMode: "dontAsk",
-        // Write is added so the agent can author `.excalidraw` files in the
-        // ephemeral worktree. It has NO gh/push tool — GitHub stays untouched.
-        allowedTools: ["Read", "Grep", "Glob", "Bash", "Write"],
-        settingSources: [],
-        env,
-        maxTurns: cfg.overview.maxTurns,
-        stderr: tracePath ? (s: string) => trace({ type: "stderr", text: s }) : () => {},
-      },
-    })) {
-      trace(msg);
-      if (msg.type === "result") {
-        endSubtype = msg.subtype;
-        if (msg.subtype === "success") last = msg.result;
-      }
-    }
 
-    const collected = collectFromWorktree(dir);
+    const endSubtype = await runOverviewAgent({
+      prompt: buildPrompt(pr, dir),
+      systemPrompt: buildSystemPrompt(pr.role, dir),
+      dir,
+      env,
+      modelArn,
+      maxTurns: cfg.overview.maxTurns,
+      trace,
+    });
+
+    let collected = collectFromWorktree(dir);
     if (!collected) {
       // Be specific about WHY nothing came back — a bare "(success)" marker hid a
       // real bug where the agent wrote the manifest outside the worktree. Name the
@@ -287,6 +311,32 @@ export async function generateOverview(prKey: string): Promise<OverviewResult> {
       };
       persist(prKey, result);
       return result;
+    }
+
+    // ONE text-only repair attempt for any section whose SVG failed sanitization
+    // (malformed markup, a stripped-to-nothing doc, a disallowed element). We feed
+    // the concrete validation errors back — NO render, NO PNG — and re-collect. A
+    // section still invalid after this is dropped; the prose overview is unharmed.
+    if (collected.invalid.length) {
+      const detail = collected.invalid
+        .map((iv) => `${iv.section} (${iv.errors.join("; ")})`)
+        .join(", ");
+      logEvent(
+        null,
+        "overview",
+        `${prKey}: repairing ${collected.invalid.length} invalid diagram(s): ${detail}`
+      );
+      await runOverviewAgent({
+        prompt: buildRepairPrompt(dir, collected.invalid),
+        systemPrompt: buildSystemPrompt(pr.role, dir),
+        dir,
+        env,
+        modelArn,
+        maxTurns: cfg.overview.maxTurns,
+        trace,
+      });
+      const recollected = collectFromWorktree(dir);
+      if (recollected) collected = recollected;
     }
 
     // Verified Risk Analysis (reviewer-role PRs only) — reuse the SAME worktree,
@@ -466,7 +516,7 @@ export function requestQuestion(prKey: string, question: string): { ok: boolean;
  * run generation inside the shared per-repo SerialQueue (worktree
  * collision-safety), and emit `pr_overview_updated` around it. Rejects a second
  * request while one is in flight for the same PR. Never throws to the caller —
- * failures land on the row as `failed` (incl. missing Chromium).
+ * failures land on the row as `failed`.
  */
 export function requestOverview(prKey: string): { ok: boolean; reason?: string } {
   const cfg = loadConfig();
@@ -489,7 +539,7 @@ export function requestOverview(prKey: string): { ok: boolean; reason?: string }
       logEvent(
         null,
         "overview",
-        `${prKey}: ${r.status} (canvases=${Object.keys(r.diagrams).length})`
+        `${prKey}: ${r.status} (diagrams=${Object.keys(r.diagrams).length})`
       );
     } catch (err: any) {
       updatePrOverview(prKey, {
@@ -506,9 +556,9 @@ export function requestOverview(prKey: string): { ok: boolean; reason?: string }
 }
 
 /**
- * Persist the overview markdown + diagram set (JSON). A fresh generation CLEARS
- * `diagramsEditedAt` — the owner's manual edits are gone by definition (Regen is
- * the "start over" verb; the dashboard warns before calling it).
+ * Persist the overview markdown + diagram set (JSON). Diagrams are read-only, so
+ * a fresh generation simply overwrites the prior set — there are no owner edits
+ * to preserve or clear.
  */
 function persist(prKey: string, r: OverviewResult): void {
   updatePrOverview(prKey, {
@@ -517,7 +567,6 @@ function persist(prKey: string, r: OverviewResult): void {
     overviewHeadSha: r.headSha,
     overviewStatus: r.status,
     overviewGeneratedAt: new Date().toISOString(),
-    diagramsEditedAt: null,
     // Risk artifact is persisted alongside the overview (reviewer PRs). Undefined
     // for author PRs leaves the columns untouched; an explicit null clears them.
     ...(r.risksStatus !== undefined ? { risks: r.risks ?? [], risksStatus: r.risksStatus } : {}),

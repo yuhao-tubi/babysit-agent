@@ -20,7 +20,6 @@ import { requestOverview, requestQuestion } from "./overview.js";
 import { requestQuiz } from "./quiz.js";
 import { requestBlindSpots, blindSpotsStale } from "./risks.js";
 import { isIgnoredRepo } from "./classify.js";
-import type { DiagramSection, DiagramSet, ExcalidrawDoc } from "./types.js";
 import {
   applyInstruction,
   approveThread,
@@ -146,11 +145,10 @@ export async function startServer(port: number): Promise<void> {
     const prKey = decodeURIComponent(req.params.key);
     const pr = getPrOverview(prKey);
     if (!pr) return reply.code(404).send({ error: "not found" });
-    // Stale when the artifact was built against a head that has since moved —
-    // but once the owner has hand-edited a canvas, they own it, so suppress the
-    // staleness nag (a Regenerate would discard their edits anyway).
+    // Stale when the artifact was built against a head that has since moved.
+    // Diagrams are read-only (regenerate to refresh), so there are no owner edits
+    // to preserve — the staleness signal is purely head-drift.
     const stale =
-      !pr.diagramsEditedAt &&
       !!pr.overviewHeadSha &&
       !!pr.headSha &&
       pr.overviewHeadSha !== pr.headSha;
@@ -178,7 +176,6 @@ export async function startServer(port: number): Promise<void> {
       overviewHeadSha: pr.overviewHeadSha,
       currentHeadSha: pr.headSha,
       generatedAt: pr.overviewGeneratedAt,
-      diagramsEditedAt: pr.diagramsEditedAt,
       stale,
       // Risk analysis: Verified risks (reviewer) or author Blind spots. Findings
       // are withheld while generating and when stale (author head moved) so the
@@ -235,42 +232,6 @@ export async function startServer(port: number): Promise<void> {
       if (!question?.trim()) return reply.code(400).send({ error: "question required" });
       const r = requestQuestion(prKey, question);
       if (!r.ok) return reply.code(409).send({ error: r.reason });
-      return { ok: true };
-    }
-  );
-
-  // Save a hand-edited diagram canvas (the dashboard's Save button). This is the
-  // FIRST mutating overview route — the owner edits an Excalidraw canvas and
-  // persists it. Local-disk only (SQLite), so it is exempt from `dryRun` (which
-  // gates GitHub writes, not our own state). Overwrites the section's canvas
-  // (single source of truth, Q7) and stamps `diagramsEditedAt` so Regenerate
-  // knows to warn and the staleness nag is suppressed.
-  app.put<{ Params: { key: string }; Body: { section?: string; doc?: unknown } }>(
-    "/api/prs/:key/diagrams",
-    async (req, reply) => {
-      const prKey = decodeURIComponent(req.params.key);
-      const pr = getPrOverview(prKey);
-      if (!pr) return reply.code(404).send({ error: "not found" });
-      if (isIgnoredRepo(pr.owner, pr.repo)) {
-        return reply.code(409).send({ error: "repo not in scope" });
-      }
-      const section = req.body?.section as DiagramSection | undefined;
-      if (section !== "why" && section !== "what" && section !== "how") {
-        return reply.code(400).send({ error: "section must be why|what|how" });
-      }
-      const doc = req.body?.doc as ExcalidrawDoc | undefined;
-      // Minimal structural validation — same wrapper check the renderer enforces.
-      if (
-        !doc ||
-        typeof doc !== "object" ||
-        (doc as any).type !== "excalidraw" ||
-        !Array.isArray((doc as any).elements)
-      ) {
-        return reply.code(400).send({ error: "doc must be a valid excalidraw document" });
-      }
-      const next: DiagramSet = { ...pr.diagrams, [section]: doc };
-      updatePrOverview(prKey, { diagrams: next, diagramsEditedAt: new Date().toISOString() });
-      emit({ type: "pr_overview_updated", prKey });
       return { ok: true };
     }
   );

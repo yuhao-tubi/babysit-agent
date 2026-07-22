@@ -35,22 +35,17 @@ export interface PrGroup {
 
 export type OverviewStatus = "idle" | "generating" | "ready" | "failed";
 
-/** The 4W1H sections a diagram canvas can belong to. */
+/** The 4W1H sections a diagram can belong to. */
 export type DiagramSection = "why" | "what" | "how";
 
-/** A raw Excalidraw document (the `.excalidraw` file shape). Loosely typed —
- *  the durable truth is whatever @excalidraw/excalidraw reads/writes. */
-export interface ExcalidrawDoc {
-  type: "excalidraw";
-  version?: number;
-  source?: string;
-  elements: unknown[];
-  appState?: Record<string, unknown>;
-  files?: Record<string, unknown>;
+/** A PR-overview diagram: a single sanitized, self-contained `<svg>` string the
+ *  agent authored in one pass. Rendered inline read-only (see issue #1). */
+export interface DiagramDoc {
+  svg: string;
 }
 
-/** The diagram set: up to one editable Excalidraw canvas per 4W1H section. */
-export type DiagramSet = Partial<Record<DiagramSection, ExcalidrawDoc>>;
+/** The diagram set: up to one read-only SVG diagram per 4W1H section. */
+export type DiagramSet = Partial<Record<DiagramSection, DiagramDoc>>;
 
 export type QuizStatus = "generating" | "ready" | "failed";
 
@@ -103,8 +98,6 @@ export interface PrOverview {
   overviewHeadSha: string | null;
   currentHeadSha: string | null;
   generatedAt: string | null;
-  /** When the owner last hand-edited+saved a canvas (null = never). */
-  diagramsEditedAt: string | null;
   stale: boolean;
   /**
    * Risk analysis — reviewer Verified risks or author Blind spots. Withheld ([])

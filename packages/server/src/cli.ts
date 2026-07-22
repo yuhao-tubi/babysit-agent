@@ -11,7 +11,6 @@ import { pollOnce } from "./poller.js";
 import { getThread, getThreadItems, listThreads, updateThread } from "./db.js";
 import { runVerdict } from "./verdict.js";
 import { generateOverview } from "./overview.js";
-import { renderExcalidraw } from "./render.js";
 import { getPrOverview } from "./db.js";
 import { runGate } from "./gate.js";
 import { clonePath } from "./worktrees.js";
@@ -90,12 +89,12 @@ async function main() {
       const r = await generateOverview(prKey);
       const sections = Object.keys(r.diagrams);
       console.log(
-        `status: ${r.status}  head: ${r.headSha}  canvases: ${sections.length} [${sections.join(", ")}]`
+        `status: ${r.status}  head: ${r.headSha}  diagrams: ${sections.length} [${sections.join(", ")}]`
       );
       console.log("--- overview ---");
       console.log(r.overviewMd);
       for (const [section, doc] of Object.entries(r.diagrams)) {
-        console.log(`\n[${section}] excalidraw canvas — ${doc?.elements.length ?? 0} elements`);
+        console.log(`\n[${section}] svg diagram — ${doc?.svg.length ?? 0} bytes`);
       }
       if (r.risksStatus != null) printRisks(r.risksStatus, r.risks ?? []);
       break;
@@ -129,15 +128,6 @@ async function main() {
       const r = await generateBlindSpots(prKey);
       console.log(`blind-spot status: ${r.status}  head: ${r.headSha}`);
       printRisks(r.status, r.risks);
-      break;
-    }
-    case "render": {
-      // Render an .excalidraw file to a PNG (used by the overview agent's
-      // write→render→view→fix loop, and for manual renderer verification).
-      const file = process.argv[3];
-      if (!file) throw new Error("usage: cli.ts render <file.excalidraw>");
-      const r = await renderExcalidraw(file);
-      console.log(`${r.pngPath} (${r.width}x${r.height})`);
       break;
     }
     case "gate": {

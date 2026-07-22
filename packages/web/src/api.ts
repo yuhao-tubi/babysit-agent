@@ -1,4 +1,4 @@
-import type { PrGroup, ThreadDetail, PrOverview, DiagramSection, ExcalidrawDoc } from "./types";
+import type { PrGroup, ThreadDetail, PrOverview } from "./types";
 
 export async function fetchPrs(): Promise<PrGroup[]> {
   const r = await fetch("/api/prs");
@@ -101,21 +101,6 @@ export async function generatePrOverview(prKey: string): Promise<void> {
   });
   if (!r.ok && r.status !== 409) {
     throw new Error((await r.json().catch(() => ({})))?.error ?? "generate failed");
-  }
-}
-
-export async function savePrDiagram(
-  prKey: string,
-  section: DiagramSection,
-  doc: ExcalidrawDoc
-): Promise<void> {
-  const r = await fetch(`/api/prs/${encodeURIComponent(prKey)}/diagrams`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ section, doc }),
-  });
-  if (!r.ok) {
-    throw new Error((await r.json().catch(() => ({})))?.error ?? "save failed");
   }
 }
 
