@@ -15,6 +15,7 @@ import { renderExcalidraw } from "./render.js";
 import { getPrOverview } from "./db.js";
 import { runGate } from "./gate.js";
 import { clonePath } from "./worktrees.js";
+import { generateBlindSpots } from "./risks.js";
 import { processThread } from "./processor.js";
 import { getEvents } from "./db.js";
 
@@ -115,6 +116,21 @@ async function main() {
       printRisks(r.risksStatus ?? null, r.risks ?? []);
       break;
     }
+    case "blindspots": {
+      // Author-role Blind-spot analysis (CONTEXT.md). Runs the same on-demand
+      // engine the dashboard's POST /blindspots uses: `generateBlindSpots`
+      // provisions its own read-only skipDeps worktree, runs the finder→confirmer
+      // in "author" mode with the PR body as an advisory lens, and PERSISTS the
+      // artifact + head sha. Read-only w.r.t. GitHub. PR must be in the DB
+      // (run poll-once). The CLI just prints what was persisted.
+      const prKey = process.argv[3];
+      if (!prKey) throw new Error("usage: cli.ts blindspots <owner/repo#number>");
+      if (!getPrOverview(prKey)) throw new Error(`no PR ${prKey} in db — run poll-once first`);
+      const r = await generateBlindSpots(prKey);
+      console.log(`blind-spot status: ${r.status}  head: ${r.headSha}`);
+      printRisks(r.status, r.risks);
+      break;
+    }
     case "render": {
       // Render an .excalidraw file to a PNG (used by the overview agent's
       // write→render→view→fix loop, and for manual renderer verification).
@@ -139,10 +155,12 @@ async function main() {
 }
 
 /** Pretty-print the merged risk artifact for the CLI verbs. */
-function printRisks(status: "ready" | "failed" | null, risks: { title: string; level: string; state: string; location: { path: string; startLine: number }; verdict?: { rationale: string } }[]): void {
+function printRisks(status: "generating" | "ready" | "failed" | null, risks: { title: string; level: string; state: string; layer?: string; inDescription?: boolean; location: { path: string; startLine: number }; verdict?: { rationale: string } }[]): void {
   console.log(`\n--- risks (${status ?? "n/a"}) — ${risks.length} item(s) ---`);
   for (const r of risks) {
-    console.log(`  [${r.level.toUpperCase()}] (${r.state}) ${r.title}  @ ${r.location.path}:${r.location.startLine}`);
+    const layer = r.layer ? `{${r.layer}} ` : "";
+    const notInDesc = r.inDescription === false ? " ⚠ not-in-description" : "";
+    console.log(`  [${r.level.toUpperCase()}] (${r.state}) ${layer}${r.title}  @ ${r.location.path}:${r.location.startLine}${notInDesc}`);
     if (r.verdict?.rationale) console.log(`      ↳ ${r.verdict.rationale.slice(0, 160)}`);
   }
 }

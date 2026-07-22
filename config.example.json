@@ -40,7 +40,8 @@
   },
   "overview": {
     "enabled": true,
-    "maxTurns": 150
+    "maxTurns": 150,
+    "reviewerModelName": "claude-sonnet"
   },
-  "comment": "Copy to config.json and edit. Bedrock auth uses KeySmith — set KEYSMITH_* in .env (see .env.example). bedrockModelName is the KeySmith friendly model name, resolved to an inference-profile ARN at runtime. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action. autoPushClasses lists author classes (\"ci\"/\"bot\"/\"human\") allowed to push without owner approval when the gate passes; default [] means every change parks at awaiting_approval for you to Approve (risk:high always parks regardless)."
+  "comment": "Copy to config.json and edit. Bedrock auth uses KeySmith — set KEYSMITH_* in .env (see .env.example). bedrockModelName is the KeySmith friendly model name for the author/push path (verdict/gate/executor + author overview & blind spots), resolved to an inference-profile ARN at runtime. overview.reviewerModelName is the (faster) model for read-only reviewer-facing artifacts: reviewer overview + risk analysis, the quiz, and Q&A — both must be models the KeySmith token can invoke. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action. autoPushClasses lists author classes (\"ci\"/\"bot\"/\"human\") allowed to push without owner approval when the gate passes; default [] means every change parks at awaiting_approval for you to Approve (risk:high always parks regardless)."
 }

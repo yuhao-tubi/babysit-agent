@@ -10,13 +10,15 @@ import {
   listThreads,
   listPrsWithThreads,
   listReviewerPrs,
-  listExpiredPrs,
+  listExpiredPrsPage,
+  type PrRow,
   lastPollTime,
   getPrOverview,
   updatePrOverview,
 } from "./db.js";
 import { requestOverview, requestQuestion } from "./overview.js";
 import { requestQuiz } from "./quiz.js";
+import { requestBlindSpots, blindSpotsStale } from "./risks.js";
 import { isIgnoredRepo } from "./classify.js";
 import type { DiagramSection, DiagramSet, ExcalidrawDoc } from "./types.js";
 import {
@@ -69,54 +71,72 @@ export async function startServer(port: number): Promise<void> {
     };
   });
 
+  // Build the PR-group shape (status/counts/threads) the dashboard renders. Takes
+  // a pre-fetched thread list so a caller can fetch `listThreads()` once and reuse
+  // it across a page of PRs rather than re-querying per row.
+  const toGroup = (p: PrRow, threads: ReturnType<typeof listThreads>) => {
+    const ts = threads.filter((t) => t.prKey === p.prKey);
+    const status = rollupStatus(ts.map((t) => t.status));
+    const counts = {
+      blocked: ts.filter((t) => t.status === "blocked" || t.status === "error").length,
+      awaiting: ts.filter((t) => t.status === "awaiting_approval").length,
+      ongoing: ts.filter((t) => t.status === "pending" || t.status === "in_progress").length,
+      resolved: ts.filter((t) => t.status === "resolved").length,
+    };
+    return {
+      prKey: p.prKey,
+      title: p.title,
+      url: p.url,
+      role: p.role,
+      status,
+      counts,
+      lastPolled: p.lastPolled,
+      expiredAt: p.expiredAt,
+      threads: ts.map((t) => ({
+        id: t.id,
+        status: t.status,
+        authorClass: t.authorClass,
+        threadKey: t.threadKey,
+        action: t.verdictJson ? JSON.parse(t.verdictJson).action : null,
+        summary: t.verdictJson ? JSON.parse(t.verdictJson).summary : null,
+        updatedAt: t.updatedAt,
+      })),
+    };
+  };
+
   // PRs (the "Session" view) each with their threads; blocked PRs float to top.
+  // LIVE PRs only — expired (merged/closed) PRs are RETAINED but served from the
+  // dedicated /api/prs/expired page so they stay off this SSE-driven hot path.
   app.get("/api/prs", async () => {
     const threads = listThreads();
     // Authored PRs (with threads) + review-requested PRs (overview-only, no
     // threads). Reviewer rows render for the overview panel only.
     const authored = listPrsWithThreads();
     const reviewer = listReviewerPrs();
-    // Expired PRs (merged/closed) are RETAINED and surfaced in their own section;
-    // the dashboard splits the list on the `expiredAt` field.
-    const expired = listExpiredPrs();
-    const toGroup = (p: (typeof authored)[number]) => {
-      const ts = threads.filter((t) => t.prKey === p.prKey);
-      const status = rollupStatus(ts.map((t) => t.status));
-      const counts = {
-        blocked: ts.filter((t) => t.status === "blocked" || t.status === "error").length,
-        awaiting: ts.filter((t) => t.status === "awaiting_approval").length,
-        ongoing: ts.filter((t) => t.status === "pending" || t.status === "in_progress").length,
-        resolved: ts.filter((t) => t.status === "resolved").length,
-      };
-      return {
-        prKey: p.prKey,
-        title: p.title,
-        url: p.url,
-        role: p.role,
-        status,
-        counts,
-        lastPolled: p.lastPolled,
-        expiredAt: p.expiredAt,
-        threads: ts.map((t) => ({
-          id: t.id,
-          status: t.status,
-          authorClass: t.authorClass,
-          threadKey: t.threadKey,
-          action: t.verdictJson ? JSON.parse(t.verdictJson).action : null,
-          summary: t.verdictJson ? JSON.parse(t.verdictJson).summary : null,
-          updatedAt: t.updatedAt,
-        })),
-      };
-    };
-    const out = [...authored, ...reviewer].map(toGroup);
+    const out = [...authored, ...reviewer].map((p) => toGroup(p, threads));
     // blocked PRs first, then awaiting approval, then ongoing, then resolved.
     // Reviewer PRs (no threads → "resolved" rollup) naturally sort last.
     const rank = (s: ThreadStatus) =>
       s === "blocked" ? 0 : s === "awaiting_approval" ? 1 : s === "pending" ? 2 : 3;
     out.sort((a, b) => rank(a.status) - rank(b.status));
-    // Expired PRs keep their own most-recently-expired-first order, appended last.
-    return [...out, ...expired.map(toGroup)];
+    return out;
   });
+
+  // One page of expired (merged/closed) PRs, most-recently-expired first — the
+  // dashboard's "Expired" view. Load-more pagination: returns exactly `pageSize`
+  // items while more remain, fewer on the last page (so the client hides "Load
+  // more" when it gets a short page). `listThreads()` is fetched once and reused
+  // across the page so expired rows stay fully expandable (threads/counts).
+  app.get<{ Querystring: { page?: string; pageSize?: string } }>(
+    "/api/prs/expired",
+    async (req) => {
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
+      const rows = listExpiredPrsPage(page, pageSize);
+      const threads = listThreads();
+      return { items: rows.map((p) => toGroup(p, threads)), page, pageSize };
+    }
+  );
 
   // ---- PR-level overview + diagram (a Session artifact). Keyed by prKey,
   // URL-encoded in the path (prKey = owner/repo#number is not path-safe). ----
@@ -140,6 +160,13 @@ export async function startServer(port: number): Promise<void> {
     const quizStale =
       !!pr.quizHeadSha && !!pr.headSha && pr.quizHeadSha !== pr.headSha;
     const quizReady = pr.quizStatus === "ready" && !quizStale;
+    // Author Blind spots decouple from the overview run and track their own head
+    // sha, so they go stale when the author's branch moves. Withhold stale/
+    // generating findings so the panel prompts a Regenerate rather than show risks
+    // against code that has since changed. Reviewer risks carry no risksHeadSha,
+    // so blindSpotsStale is always false for them (their PR is static).
+    const risksStale = blindSpotsStale(pr.risksHeadSha, pr.headSha);
+    const risksReady = pr.risksStatus === "ready" && !risksStale;
     return {
       prKey: pr.prKey,
       title: pr.title,
@@ -153,9 +180,15 @@ export async function startServer(port: number): Promise<void> {
       generatedAt: pr.overviewGeneratedAt,
       diagramsEditedAt: pr.diagramsEditedAt,
       stale,
-      // Verified Risk Analysis (reviewer PRs) — merged items + independent status.
-      risks: pr.risks,
+      // Risk analysis: Verified risks (reviewer) or author Blind spots. Findings
+      // are withheld while generating and when stale (author head moved) so the
+      // panel prompts a Regenerate rather than serving them against changed code;
+      // `risksStatus` still reflects the raw row state. Reviewer risks are never
+      // stale (no risksHeadSha), so they always surface when `ready`.
+      risks: risksReady ? pr.risks : [],
       risksStatus: pr.risksStatus,
+      risksHeadSha: pr.risksHeadSha,
+      risksStale,
       // PR-comprehension quiz. Questions are withheld while generating and when
       // stale (head moved) so the UI prompts a Regenerate rather than serving an
       // outdated quiz. `quizStatus` still reflects the raw row state.
@@ -170,6 +203,16 @@ export async function startServer(port: number): Promise<void> {
   app.post<{ Params: { key: string } }>("/api/prs/:key/quiz", async (req, reply) => {
     const prKey = decodeURIComponent(req.params.key);
     const r = requestQuiz(prKey);
+    if (!r.ok) return reply.code(409).send({ error: r.reason });
+    return { ok: true };
+  });
+
+  // Trigger author Blind-spot (re)generation for a PR. Fire-and-forget; progress
+  // arrives via the `pr_risks_updated` SSE event. Author-role only; requires an
+  // existing overview (the finder is grounded on it).
+  app.post<{ Params: { key: string } }>("/api/prs/:key/blindspots", async (req, reply) => {
+    const prKey = decodeURIComponent(req.params.key);
+    const r = requestBlindSpots(prKey);
     if (!r.ok) return reply.code(409).send({ error: r.reason });
     return { ok: true };
   });

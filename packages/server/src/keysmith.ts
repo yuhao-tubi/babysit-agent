@@ -27,8 +27,16 @@ export interface BedrockSession {
   token: string;
   /** Region the token is scoped to (→ AWS_REGION). */
   region: string;
-  /** Application Inference Profile ARN for the configured model — the SDK `model`. */
+  /** Application Inference Profile ARN for the configured DEFAULT model (`bedrockModelName`) — the SDK `model`. */
   modelArn: string;
+  /**
+   * ALL model ARNs the minted token may invoke, keyed by KeySmith friendly name
+   * (e.g. `claude-opus`, `claude-sonnet`). One token covers every model in the
+   * profile (see `allowedModels` in the token response), so a caller can pick a
+   * cheaper/faster model per task WITHOUT minting a second token. Resolve via
+   * `modelArnFor`.
+   */
+  models: Record<string, string>;
   /** Epoch ms after which the token must be re-minted. */
   expiresAt: number;
 }
@@ -105,10 +113,16 @@ async function mint(): Promise<BedrockSession> {
     );
   }
 
+  // Keep every vended ARN so a caller can invoke a non-default model (e.g. the
+  // read-only overview/risk/quiz artifacts on sonnet) under the SAME token.
+  const models: Record<string, string> = {};
+  for (const m of data.models ?? []) models[m.name] = m.modelId;
+
   return {
     token: data.token,
     region: data.region,
     modelArn: match.modelId,
+    models,
     expiresAt: Date.now() + data.expiresIn * 1000,
   };
 }
@@ -122,4 +136,23 @@ export async function getBedrockSession(): Promise<BedrockSession> {
   if (cache && Date.now() < cache.expiresAt - REFRESH_MARGIN_MS) return cache;
   cache = await mint();
   return cache;
+}
+
+/**
+ * Resolve the inference-profile ARN for a KeySmith friendly model name (e.g.
+ * `claude-sonnet`) under the current token. `undefined`/empty falls back to the
+ * default model (`bedrockModelName`). Throws if the requested name isn't one the
+ * token may invoke — a config typo should fail loudly, not silently downgrade.
+ */
+export async function resolveModelArn(name?: string): Promise<string> {
+  const session = await getBedrockSession();
+  if (!name) return session.modelArn;
+  const arn = session.models[name];
+  if (!arn) {
+    const available = Object.keys(session.models).join(", ");
+    throw new Error(
+      `KeySmith: model "${name}" not vended by the current token. Available: ${available || "(none)"}`
+    );
+  }
+  return arn;
 }

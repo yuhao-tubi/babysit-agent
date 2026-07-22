@@ -1,8 +1,9 @@
-import { Alert, Collapse, Space, Tag, Typography } from "antd";
+import { Alert, Button, Collapse, Space, Tag, Typography } from "antd";
 import {
   CheckCircleTwoTone,
   CloseCircleTwoTone,
   ExclamationCircleOutlined,
+  ReloadOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import type { RiskItem, RiskLevel, RiskStatus } from "./types";
@@ -18,100 +19,175 @@ const LEVEL_COLOR: Record<RiskLevel, string> = {
 };
 
 /**
- * Verified Risk Analysis panel (reviewer PRs). Confirmed/unverified risks render
- * as severity-tagged collapsible cards, sorted high→low by the server. Dismissed
- * risks (false positives the confirmer rejected, with cited rationale) collapse
- * into a "Considered & dismissed" group at the bottom.
+ * Risk analysis panel. Two roles, one shape (see CONTEXT.md / PR-resources spec):
+ *  - reviewer: **Verified risks** on someone else's PR (produced by the same
+ *    Generate run as the overview — no separate button).
+ *  - author: **Blind spots** on your own change — an on-demand artifact like the
+ *    quiz, so it carries its own Generate button, generating/stale states, and
+ *    layer / not-in-description tags.
+ * Confirmed/unverified risks render as severity-tagged collapsible cards, sorted
+ * high→low by the server; dismissed risks collapse into a group at the bottom.
  */
 export function RisksPanel({
   risks,
   status,
+  mode = "reviewer",
+  stale = false,
+  hasOverview = true,
+  busy = false,
+  onGenerate,
 }: {
   risks: RiskItem[];
   status: RiskStatus | null;
+  /** "author" enables Blind-spot framing + the on-demand Generate control. */
+  mode?: "reviewer" | "author";
+  /** Author only: the analyzed head has moved (findings withheld until Regenerate). */
+  stale?: boolean;
+  /** Author only: gate generation on an existing overview (the finder is grounded on it). */
+  hasOverview?: boolean;
+  /** Author only: a request is in flight. */
+  busy?: boolean;
+  /** Author only: trigger (re)generation. */
+  onGenerate?: () => void;
 }) {
-  if (status == null) return null;
+  const author = mode === "author";
+  const generating = status === "generating";
 
-  if (status === "failed") {
-    return (
-      <div style={{ marginTop: 16 }}>
-        <SectionHeader />
-        <Alert
-          type="error"
-          showIcon
-          message="Risk analysis failed"
-          description="The finder pass produced no usable output. Try Regenerate."
-          style={{ marginTop: 6 }}
-        />
-      </div>
-    );
-  }
+  // Author panel always renders (it owns its Generate button); the reviewer panel
+  // stays invisible until its piggybacked run has produced a status.
+  if (!author && status == null) return null;
 
   const shown = risks.filter((r) => r.state !== "dismissed");
   const dismissed = risks.filter((r) => r.state === "dismissed");
 
   return (
-    <div style={{ marginTop: 16 }}>
-      <SectionHeader count={shown.length} />
-      {shown.length === 0 ? (
+    <div style={{ marginTop: 16, ...(author ? { borderTop: "1px solid #f0f0f0", paddingTop: 12 } : {}) }}>
+      <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 6 }}>
+        <SectionHeader mode={mode} count={status === "ready" && !stale ? shown.length : undefined} />
+        {author && (
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            loading={busy || generating}
+            disabled={!hasOverview || generating}
+            onClick={onGenerate}
+          >
+            {status === "ready" && !stale ? "Regenerate" : "Find blind spots"}
+          </Button>
+        )}
+      </Space>
+
+      {author && !hasOverview && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Generate an overview first — the blind-spot finder is grounded on it.
+        </Text>
+      )}
+
+      {generating && (
         <Alert
-          type="success"
+          type="info"
           showIcon
-          message="No significant risks identified"
-          description="The agent reviewed the change and found nothing a reviewer must scrutinize."
+          message={author ? "Hunting for blind spots…" : "Analyzing risks…"}
+          description="Investigating the PR checkout across its layers. This runs a finder→confirmer pass and may take a minute or two."
           style={{ marginTop: 6 }}
-        />
-      ) : (
-        <Collapse
-          style={{ marginTop: 6 }}
-          items={shown.map((r) => ({
-            key: r.id,
-            label: <RiskLabel risk={r} />,
-            children: <RiskBody risk={r} />,
-          }))}
         />
       )}
 
-      {dismissed.length > 0 && (
-        <Collapse
-          ghost
-          style={{ marginTop: 8 }}
-          items={[
-            {
-              key: "dismissed",
-              label: (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Considered &amp; dismissed ({dismissed.length})
-                </Text>
-              ),
-              children: (
-                <Space direction="vertical" style={{ width: "100%" }} size={8}>
-                  {dismissed.map((r) => (
-                    <div key={r.id} style={{ opacity: 0.7 }}>
-                      <Text delete style={{ fontSize: 13 }}>
-                        {r.title}
-                      </Text>
-                      {r.verdict?.rationale && (
-                        <div style={{ fontSize: 12, marginTop: 2 }}>
-                          <Text type="secondary">Dismissed: {r.verdict.rationale}</Text>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </Space>
-              ),
-            },
-          ]}
+      {status === "failed" && !generating && (
+        <Alert
+          type="error"
+          showIcon
+          message={author ? "Blind-spot analysis failed" : "Risk analysis failed"}
+          description="The finder pass produced no usable output. Try Regenerate."
+          style={{ marginTop: 6 }}
         />
       )}
+
+      {author && stale && !generating && status === "ready" && (
+        <Alert
+          type="warning"
+          showIcon
+          message="These blind spots are out of date"
+          description="Your branch has moved since they were found. Regenerate to hunt against the current code."
+          style={{ marginTop: 6 }}
+        />
+      )}
+
+      {author && !generating && status == null && hasOverview && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          No blind-spot analysis yet. Click “Find blind spots” to hunt for downstream
+          harm your change might cause.
+        </Text>
+      )}
+
+      {status === "ready" && !stale && !generating && (
+      shown.length === 0 ? (
+        <Alert
+          type="success"
+          showIcon
+          message={author ? "No blind spots found" : "No significant risks identified"}
+          description={
+            author
+              ? "The finder hunted each layer of your change and found no downstream harm to flag."
+              : "The agent reviewed the change and found nothing a reviewer must scrutinize."
+          }
+          style={{ marginTop: 6 }}
+        />
+      ) : (
+        <>
+          <Collapse
+            style={{ marginTop: 6 }}
+            items={shown.map((r) => ({
+              key: r.id,
+              label: <RiskLabel risk={r} />,
+              children: <RiskBody risk={r} />,
+            }))}
+          />
+
+          {dismissed.length > 0 && (
+            <Collapse
+              ghost
+              style={{ marginTop: 8 }}
+              items={[
+                {
+                  key: "dismissed",
+                  label: (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Considered &amp; dismissed ({dismissed.length})
+                    </Text>
+                  ),
+                  children: (
+                    <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                      {dismissed.map((r) => (
+                        <div key={r.id} style={{ opacity: 0.7 }}>
+                          <Text delete style={{ fontSize: 13 }}>
+                            {r.title}
+                          </Text>
+                          {r.verdict?.rationale && (
+                            <div style={{ fontSize: 12, marginTop: 2 }}>
+                              <Text type="secondary">Dismissed: {r.verdict.rationale}</Text>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </>
+      ))}
     </div>
   );
 }
 
-function SectionHeader({ count }: { count?: number }) {
+function SectionHeader({ mode, count }: { mode: "reviewer" | "author"; count?: number }) {
+  const label = mode === "author" ? "Blind spots in your change" : "Verified risk analysis";
   return (
     <Text type="secondary" style={{ fontSize: 12 }}>
-      <WarningOutlined /> Verified risk analysis{count != null ? ` (${count})` : ""}
+      <WarningOutlined /> {label}
+      {count != null ? ` (${count})` : ""}
     </Text>
   );
 }
@@ -120,9 +196,15 @@ function RiskLabel({ risk }: { risk: RiskItem }) {
   return (
     <Space size={6} wrap>
       <Tag color={LEVEL_COLOR[risk.level]}>{risk.level.toUpperCase()}</Tag>
+      {risk.layer && <Tag color="geekblue">{risk.layer}</Tag>}
       <Text strong style={{ fontSize: 13 }}>
         {risk.title}
       </Text>
+      {risk.inDescription === false && (
+        <Tag color="gold" style={{ fontSize: 11 }}>
+          not in your description
+        </Tag>
+      )}
       <a
         href={risk.location.permalink}
         target="_blank"

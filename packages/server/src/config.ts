@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getBedrockSession } from "./keysmith.js";
+import { getBedrockSession, resolveModelArn } from "./keysmith.js";
 import type { CheckAllowEntry } from "./ci.js";
 import type { AuthorClass } from "./types.js";
 
@@ -74,6 +74,15 @@ export interface OverviewConfig {
   enabled: boolean;
   /** Agent turn budget for the read-only PR-wide investigation. */
   maxTurns: number;
+  /**
+   * KeySmith model for the READ-ONLY, reviewer-facing artifacts — reviewer
+   * overview + Verified Risk Analysis, the PR-comprehension quiz, and reviewer
+   * Q&A. These consume-or-ask flows favor speed, so they run on a faster/cheaper
+   * model than the author path. Author overview + Blind spots stay on
+   * `bedrockModelName` (opus), as does the whole verdict/gate/executor push path.
+   * Must be a model the KeySmith token can invoke. Default `claude-sonnet`.
+   */
+  reviewerModelName: string;
 }
 
 function expandHome(p: string): string {
@@ -138,6 +147,9 @@ const DEFAULTS: Config = {
     // each through a write→render→view→fix loop (2–4 iterations). That loop is
     // turn-hungry, so the budget is well above the old prose-only 60.
     maxTurns: 150,
+    // Reviewer-facing read-only artifacts run on sonnet for speed; author work
+    // and the push path stay on bedrockModelName (opus). See OverviewConfig.
+    reviewerModelName: "claude-sonnet",
   },
 };
 
@@ -208,16 +220,22 @@ export function loadConfig(): Config {
  * Auth is a KeySmith-vended bearer token (AWS_BEARER_TOKEN_BEDROCK), not an AWS
  * profile. The model must be the inference-profile ARN that token is scoped to.
  * Async because minting/refreshing the token is a network call.
+ *
+ * `modelName` optionally selects a non-default model (e.g. `claude-sonnet` for
+ * the read-only reviewer artifacts) under the SAME token; omitted ⇒ the default
+ * `bedrockModelName`. The env (token/region) is identical either way — only the
+ * returned `modelArn` differs.
  */
-export async function sdkEnv(): Promise<{
+export async function sdkEnv(modelName?: string): Promise<{
   env: Record<string, string>;
   modelArn: string;
 }> {
   const session = await getBedrockSession();
+  const modelArn = await resolveModelArn(modelName);
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   env.CLAUDE_CODE_USE_BEDROCK = "1";
   env.AWS_BEARER_TOKEN_BEDROCK = session.token;
   env.AWS_REGION = session.region;
   env.AWS_DEFAULT_REGION = session.region;
-  return { env, modelArn: session.modelArn };
+  return { env, modelArn };
 }

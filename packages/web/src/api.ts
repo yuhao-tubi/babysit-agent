@@ -5,6 +5,16 @@ export async function fetchPrs(): Promise<PrGroup[]> {
   return r.json();
 }
 
+/** One page of expired (merged/closed) PRs for the sidebar's "Expired" view.
+ *  Load-more pagination: a full page (items.length === pageSize) means more remain. */
+export async function fetchExpiredPrs(
+  page: number,
+  pageSize = 20
+): Promise<{ items: PrGroup[]; page: number; pageSize: number }> {
+  const r = await fetch(`/api/prs/expired?page=${page}&pageSize=${pageSize}`);
+  return r.json();
+}
+
 export async function fetchThread(id: number): Promise<ThreadDetail> {
   const r = await fetch(`/api/threads/${id}`);
   if (!r.ok) throw new Error("not found");
@@ -115,6 +125,15 @@ export async function generatePrQuiz(prKey: string): Promise<void> {
   });
   if (!r.ok && r.status !== 409) {
     throw new Error((await r.json().catch(() => ({})))?.error ?? "quiz failed");
+  }
+}
+
+export async function generatePrBlindSpots(prKey: string): Promise<void> {
+  const r = await fetch(`/api/prs/${encodeURIComponent(prKey)}/blindspots`, {
+    method: "POST",
+  });
+  if (!r.ok && r.status !== 409) {
+    throw new Error((await r.json().catch(() => ({})))?.error ?? "blind-spot generation failed");
   }
 }
 

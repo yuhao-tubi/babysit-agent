@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeRiskVerdicts, parseRisksFile, parseVerdictsFile } from "./risks.js";
+import { mergeRiskVerdicts, parseRisksFile, parseVerdictsFile, blindSpotsStale } from "./risks.js";
 import type { RiskCandidate } from "./types.js";
 
 function candidate(over: Partial<RiskCandidate> = {}): RiskCandidate {
@@ -70,6 +70,31 @@ test("an orphan confirmer record (no matching candidate) is ignored", () => {
   assert.equal(risks[0].id, "risk-1");
 });
 
+test("mergeRiskVerdicts carries layer + inDescription through confirmed/dismissed/unverified", () => {
+  const risks = mergeRiskVerdicts(
+    [
+      candidate({ id: "a", layer: "analytics", inDescription: false }),
+      candidate({ id: "b", layer: "experiment", inDescription: true }),
+      candidate({ id: "c", layer: "logic", inDescription: false }),
+    ],
+    [
+      { id: "a", confirmed: true, rationale: "real" },
+      { id: "b", confirmed: false, rationale: "handled" },
+      // c has no record → unverified
+    ]
+  );
+  const byId = new Map(risks.map((r) => [r.id, r]));
+  assert.equal(byId.get("a")!.state, "confirmed");
+  assert.equal(byId.get("a")!.layer, "analytics");
+  assert.equal(byId.get("a")!.inDescription, false);
+  assert.equal(byId.get("b")!.state, "dismissed");
+  assert.equal(byId.get("b")!.layer, "experiment");
+  assert.equal(byId.get("b")!.inDescription, true);
+  assert.equal(byId.get("c")!.state, "unverified");
+  assert.equal(byId.get("c")!.layer, "logic");
+  assert.equal(byId.get("c")!.inDescription, false);
+});
+
 test("empty candidates merge to an empty array (zero-risk case)", () => {
   assert.deepEqual(mergeRiskVerdicts([], []), []);
 });
@@ -89,6 +114,34 @@ test("parseRisksFile parses a valid finder array", () => {
   assert.equal(risks.length, 1);
   assert.equal(risks[0].id, "risk-1");
   assert.equal(risks[0].level, "high");
+});
+
+test("parseRisksFile passes through the author layer tag when present", () => {
+  const raw = JSON.stringify([
+    {
+      id: "risk-1",
+      title: "t",
+      level: "high",
+      layer: "analytics",
+      location: { path: "a.ts", startLine: 3, permalink: "p" },
+      explanation: "e",
+      codeSnippet: "c",
+    },
+  ]);
+  const risks = parseRisksFile(raw);
+  assert.equal(risks[0].layer, "analytics");
+});
+
+test("parseRisksFile passes through inDescription as a boolean, ignores non-booleans", () => {
+  const raw = JSON.stringify([
+    { id: "a", title: "t", level: "low", inDescription: false, location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
+    { id: "b", title: "t", level: "low", inDescription: true, location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
+    { id: "c", title: "t", level: "low", inDescription: "yes", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
+  ]);
+  const risks = parseRisksFile(raw);
+  assert.equal(risks.find((r) => r.id === "a")!.inDescription, false);
+  assert.equal(risks.find((r) => r.id === "b")!.inDescription, true);
+  assert.equal(risks.find((r) => r.id === "c")!.inDescription, undefined);
 });
 
 test("parseRisksFile returns [] on malformed or non-array JSON", () => {
@@ -147,4 +200,25 @@ test("merged risks are sorted high → medium → low by (overridden) level", ()
     risks.map((r) => r.id),
     ["b", "c", "a"]
   );
+});
+
+// --- Author Blind-spot staleness (spec: independent risks_head_sha tracking) ---
+
+test("blindSpotsStale is true when the analyzed head differs from the live head", () => {
+  assert.equal(blindSpotsStale("abc123", "def456"), true);
+});
+
+test("blindSpotsStale is false when the analyzed head matches the live head", () => {
+  assert.equal(blindSpotsStale("abc123", "abc123"), false);
+});
+
+test("blindSpotsStale is false when no analysis head is recorded (never analyzed / reviewer risks)", () => {
+  // Reviewer risks piggyback the overview and carry no risks_head_sha — they must
+  // never read as stale via this predicate.
+  assert.equal(blindSpotsStale(null, "abc123"), false);
+  assert.equal(blindSpotsStale(undefined, "abc123"), false);
+});
+
+test("blindSpotsStale is false when the live head is unknown (cannot prove drift)", () => {
+  assert.equal(blindSpotsStale("abc123", null), false);
 });

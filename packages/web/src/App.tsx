@@ -6,14 +6,16 @@ import {
   Collapse,
   Empty,
   Layout,
+  Segmented,
   Space,
+  Spin,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
 import { ReloadOutlined, GithubOutlined, FileTextOutlined } from "@ant-design/icons";
 import type { PrGroup, ThreadSummary } from "./types";
-import { fetchConfig, fetchPrs, triggerPoll } from "./api";
+import { fetchConfig, fetchExpiredPrs, fetchPrs, triggerPoll } from "./api";
 import { useEventStream } from "./useEventStream";
 import { ThreadDetailView } from "./ThreadDetail";
 import { StatusTag } from "./status";
@@ -48,6 +50,9 @@ export function App() {
     lastPolledAt: string | null;
   } | null>(null);
   const [polling, setPolling] = useState(false);
+  // Sidebar view toggle: the live tree ("current") or the paginated, lazily
+  // loaded read-only history of merged/closed PRs ("expired").
+  const [view, setView] = useState<"current" | "expired">("current");
   // Per-PR counter bumped on each `pr_overview_updated` SSE event; passed to the
   // OverviewPanel so it re-fetches live during generation.
   const [overviewTicks, setOverviewTicks] = useState<Record<string, number>>({});
@@ -74,9 +79,14 @@ export function App() {
 
   const onEvent = useCallback(
     (ev: Parameters<Parameters<typeof useEventStream>[0]>[0]) => {
-      // Overview AND quiz progress both re-fetch the OverviewPanel (the quiz
-      // lives inside it) but leave the PR/thread tree untouched.
-      if (ev?.type === "pr_overview_updated" || ev?.type === "pr_quiz_updated") {
+      // Overview, quiz AND author blind-spot progress all re-fetch the
+      // OverviewPanel (they all live inside it) but leave the PR/thread tree
+      // untouched.
+      if (
+        ev?.type === "pr_overview_updated" ||
+        ev?.type === "pr_quiz_updated" ||
+        ev?.type === "pr_risks_updated"
+      ) {
         setOverviewTicks((t) => ({ ...t, [ev.prKey]: (t[ev.prKey] ?? 0) + 1 }));
         return;
       }
@@ -189,8 +199,28 @@ export function App() {
           )}
         </div>
 
+        <div style={{ padding: "12px 12px 0" }}>
+          <Segmented
+            block
+            size="small"
+            value={view}
+            onChange={(v) => setView(v as "current" | "expired")}
+            options={[
+              { label: "Current", value: "current" },
+              { label: "Expired", value: "expired" },
+            ]}
+          />
+        </div>
+
         <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", padding: 12 }}>
-          {prs.length === 0 ? (
+          {view === "expired" ? (
+            <ExpiredList
+              selected={selected}
+              selectedPr={selectedPr}
+              onSelect={select}
+              onSelectPr={selectPr}
+            />
+          ) : prs.length === 0 ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description="No PRs with feedback yet."
@@ -200,16 +230,13 @@ export function App() {
             <Space direction="vertical" size={16} style={{ width: "100%" }}>
               {(
                 [
-                  { role: "author", label: "Authored by me", expired: false },
-                  { role: "reviewer", label: "Requested my review", expired: false },
-                  // Merged/closed PRs, retained as read-only history. Grouped
-                  // together regardless of role so they stay out of the way.
-                  { role: null, label: "Expired (merged/closed)", expired: true },
+                  { role: "author", label: "Authored by me" },
+                  { role: "reviewer", label: "Requested my review" },
                 ] as const
-              ).map(({ role, label, expired }) => {
-                const group = prs.filter((p) =>
-                  expired ? !!p.expiredAt : !p.expiredAt && p.role === role
-                );
+              ).map(({ role, label }) => {
+                // /api/prs returns live PRs only (expired live in their own view),
+                // so no expiry filtering is needed here.
+                const group = prs.filter((p) => p.role === role);
                 if (!group.length) return null;
                 return (
                   <div key={label}>
@@ -237,9 +264,8 @@ export function App() {
                           onSelect={select}
                           onSelectPr={selectPr}
                           defaultOpen={
-                            !expired &&
-                            ((pr.role === "author" && pr.status !== "resolved") ||
-                              pr.prKey === linkedPr)
+                            (pr.role === "author" && pr.status !== "resolved") ||
+                            pr.prKey === linkedPr
                           }
                         />
                       ))}
@@ -301,6 +327,88 @@ export function App() {
         </Content>
       </Layout>
     </Layout>
+  );
+}
+
+/**
+ * The "Expired" sidebar view: a flat, most-recently-expired-first list of
+ * merged/closed PRs, reusing PrNode verbatim (collapsed by default). Dead
+ * history, so it loads lazily on mount (fresh page 1 each entry), ignores the
+ * SSE refresh, and grows via "Load more" — a full page (=== pageSize) means
+ * more remain. Accepts the rare offset skew if a PR expires mid-scroll.
+ */
+function ExpiredList({
+  selected,
+  selectedPr,
+  onSelect,
+  onSelectPr,
+}: {
+  selected: number | null;
+  selectedPr: string | null;
+  onSelect: (id: number) => void;
+  onSelectPr: (prKey: string) => void;
+}) {
+  const PAGE_SIZE = 20;
+  const [items, setItems] = useState<PrGroup[]>([]);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  // False once a short page comes back — hides "Load more".
+  const [hasMore, setHasMore] = useState(true);
+
+  const loadPage = useCallback(async (next: number) => {
+    setLoading(true);
+    try {
+      const res = await fetchExpiredPrs(next, PAGE_SIZE);
+      setItems((prev) => (next === 1 ? res.items : [...prev, ...res.items]));
+      setPage(next);
+      setHasMore(res.items.length === PAGE_SIZE);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Fresh page 1 on each entry into the view (component mounts on toggle).
+  useEffect(() => {
+    void loadPage(1);
+  }, [loadPage]);
+
+  if (loading && page === 0) {
+    return (
+      <div style={{ display: "flex", justifyContent: "center", marginTop: 48 }}>
+        <Spin />
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="No merged or closed PRs yet."
+        style={{ marginTop: 48 }}
+      />
+    );
+  }
+
+  return (
+    <Space direction="vertical" size={10} style={{ width: "100%" }}>
+      {items.map((pr) => (
+        <PrNode
+          key={pr.prKey}
+          pr={pr}
+          selected={selected}
+          selectedPr={selectedPr}
+          onSelect={onSelect}
+          onSelectPr={onSelectPr}
+          defaultOpen={false}
+        />
+      ))}
+      {hasMore && (
+        <Button block loading={loading} onClick={() => void loadPage(page + 1)}>
+          Load more
+        </Button>
+      )}
+    </Space>
   );
 }
 

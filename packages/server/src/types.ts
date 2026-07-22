@@ -63,6 +63,19 @@ export interface RiskCandidate {
   title: string;
   level: RiskLevel;
   category?: string;
+  /**
+   * Author-role Blind spots (see CONTEXT.md): the LLM-derived layer this finding
+   * belongs to (e.g. "analytics", "experiment"). Free-form, repo-agnostic — the
+   * finder names the layers, nothing is hardcoded. Absent for reviewer risks.
+   */
+  layer?: string;
+  /**
+   * Advisory (see CONTEXT.md, Blind spot): true when the PR description already
+   * claimed this behavior, false when it did not. A *lens*, never a filter — a
+   * Blind spot is surfaced on its downstream-harm merit regardless of this flag,
+   * so an empty/stale PR body degrades gracefully. Absent for reviewer risks.
+   */
+  inDescription?: boolean;
   location: { path: string; startLine: number; endLine?: number; permalink: string };
   /** Markdown prose: what the risk is and why it matters. */
   explanation: string;

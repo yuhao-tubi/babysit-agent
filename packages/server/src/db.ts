@@ -159,6 +159,12 @@ function migrate(d: Database.Database): void {
   // shares the overview's head-sha / generated-at / generating machinery.
   addPrCol("risks_json", "TEXT");
   addPrCol("risks_status", "TEXT");
+  // `risks_head_sha` is the head the risk analysis was built against. Reviewer
+  // risks piggyback the overview's Generate run and leave this NULL (their PR is
+  // static). AUTHOR Blind spots (PR-resources spec) DECOUPLE from the overview
+  // and set this per run, so the panel can detect staleness on a moving author
+  // branch and prompt a Regenerate rather than show findings against a stale sha.
+  addPrCol("risks_head_sha", "TEXT");
   // PR-comprehension QUIZ (a Session-level artifact like the overview/risks). Its
   // own on-demand agent run; `quiz_json` is the QuizQuestion[], `quiz_status` ∈
   // generating|ready|failed, and `quiz_head_sha` is the head it was built against
@@ -507,7 +513,7 @@ function rowToPrRow(r: any): PrRow {
 
 /**
  * Still-open PRs that currently have at least one thread-unit, newest activity
- * first. Expired PRs are excluded here — see `listExpiredPrs`.
+ * first. Expired PRs are excluded here — see `listExpiredPrsPage`.
  */
 export function listPrsWithThreads(): PrRow[] {
   const rows = getDb()
@@ -525,7 +531,7 @@ export function listPrsWithThreads(): PrRow[] {
 /**
  * Reviewer-role PRs (you're a requested reviewer). These are OVERVIEW-ONLY and
  * have no Threads, so they are listed by role rather than by thread existence.
- * Expired PRs are excluded — see `listExpiredPrs`.
+ * Expired PRs are excluded — see `listExpiredPrsPage`.
  */
 export function listReviewerPrs(): PrRow[] {
   const rows = getDb()
@@ -538,24 +544,31 @@ export function listReviewerPrs(): PrRow[] {
 }
 
 /**
- * Expired PRs (merged/closed since last seen), most-recently expired first.
- * Retained so the owner can still view their history in the dashboard's
- * "Expired" section; both authored and reviewer roles are included.
+ * One page of expired PRs (merged/closed since last seen), most-recently expired
+ * first. Retained so the owner can still inspect their history in the dashboard's
+ * dedicated "Expired" view; both authored and reviewer roles are included. Offset
+ * pagination (`page` is 1-indexed) — the Expired view is dead history loaded
+ * lazily/incrementally, never on the live SSE refresh path, so an unbounded fetch
+ * isn't wanted. A short page (< pageSize) tells the caller there's no more.
  */
-export function listExpiredPrs(): PrRow[] {
+export function listExpiredPrsPage(page: number, pageSize: number): PrRow[] {
   const rows = getDb()
     .prepare(
       `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
-       FROM prs WHERE expired_at IS NOT NULL ORDER BY expired_at DESC`
+       FROM prs WHERE expired_at IS NOT NULL ORDER BY expired_at DESC
+       LIMIT ? OFFSET ?`
     )
-    .all();
+    .all(pageSize, (page - 1) * pageSize);
   return rows.map(rowToPrRow);
 }
 
 // ---- PR-level overview + diagram artifact (a Session-level artifact) ----
 
 export type OverviewStatus = "idle" | "generating" | "ready" | "failed";
-export type RiskStatus = "ready" | "failed";
+// Reviewer risks only ever land `ready`/`failed` (produced synchronously inside
+// the overview run). AUTHOR Blind spots are an on-demand artifact like the quiz,
+// so they also use `generating` (in-flight) — hence the shared shape.
+export type RiskStatus = "generating" | "ready" | "failed";
 export type QuizStatus = "generating" | "ready" | "failed";
 
 /** Parse the stored quiz JSON into a QuizQuestion[], dropping malformed entries. */
@@ -624,10 +637,19 @@ export interface PrOverview {
   overviewGeneratedAt: string | null;
   /** When the owner last hand-edited+saved a canvas (null = never). */
   diagramsEditedAt: string | null;
-  /** Verified risk analysis (reviewer PRs) — merged RiskItem[] ([] if none/failed). */
+  /**
+   * Risk analysis: Verified risks (reviewer PRs) or author Blind spots — the same
+   * merged RiskItem[] storage ([] if none/failed). Role drives which was produced.
+   */
   risks: RiskItem[];
-  /** `ready` | `failed` | null (never run). Independent of overviewStatus. */
+  /** `generating` | `ready` | `failed` | null (never run). Independent of overviewStatus. */
   risksStatus: RiskStatus | null;
+  /**
+   * Head the risk analysis was built against — set for AUTHOR Blind spots (their
+   * own on-demand run) so staleness can be detected on a moving branch; NULL for
+   * reviewer risks, which piggyback the overview's sha. See `blindSpotsStale`.
+   */
+  risksHeadSha: string | null;
   /** PR-comprehension quiz — QuizQuestion[] ([] if never generated/failed). */
   quiz: QuizQuestion[];
   /** `generating` | `ready` | `failed` | null (never run). Independent of overview. */
@@ -671,6 +693,7 @@ function rowToOverview(r: any): PrOverview {
     diagramsEditedAt: r.diagrams_edited_at ?? null,
     risks: parseRisks(r.risks_json),
     risksStatus: (r.risks_status as RiskStatus) ?? null,
+    risksHeadSha: r.risks_head_sha ?? null,
     quiz: parseQuiz(r.quiz_json),
     quizStatus: (r.quiz_status as QuizStatus) ?? null,
     quizHeadSha: r.quiz_head_sha ?? null,
@@ -695,6 +718,7 @@ export function updatePrOverview(
     diagramsEditedAt: string | null;
     risks: RiskItem[] | null;
     risksStatus: RiskStatus | null;
+    risksHeadSha: string | null;
     quiz: QuizQuestion[] | null;
     quizStatus: QuizStatus | null;
     quizHeadSha: string | null;
@@ -709,6 +733,7 @@ export function updatePrOverview(
     diagramsEditedAt: "diagrams_edited_at",
     risks: "risks_json",
     risksStatus: "risks_status",
+    risksHeadSha: "risks_head_sha",
     quiz: "quiz_json",
     quizStatus: "quiz_status",
     quizHeadSha: "quiz_head_sha",
@@ -760,6 +785,23 @@ export function failStuckQuizzes(): string[] {
     .all() as { pr_key: string }[];
   if (!stuck.length) return [];
   db.prepare("UPDATE prs SET quiz_status='failed' WHERE quiz_status='generating'").run();
+  return stuck.map((r) => r.pr_key);
+}
+
+/**
+ * Startup sweep for author Blind spots — same reasoning as `failStuckOverviews`:
+ * a risk analysis left `generating` by a crash owes GitHub nothing, so it is
+ * reset to `failed` (re-clickable) rather than resumed. Reviewer risks never sit
+ * in `generating` (they finish inside the overview run), so this only ever
+ * catches an interrupted author run. Returns the pr_keys reset.
+ */
+export function failStuckRisks(): string[] {
+  const db = getDb();
+  const stuck = db
+    .prepare("SELECT pr_key FROM prs WHERE risks_status='generating'")
+    .all() as { pr_key: string }[];
+  if (!stuck.length) return [];
+  db.prepare("UPDATE prs SET risks_status='failed' WHERE risks_status='generating'").run();
   return stuck.map((r) => r.pr_key);
 }
 

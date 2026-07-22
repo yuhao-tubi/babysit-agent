@@ -1,7 +1,14 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { sdkEnv } from "./config.js";
+import { loadConfig, sdkEnv } from "./config.js";
+import { addWorktree, removeWorktree } from "./worktrees.js";
+import { getPrHead, getPrBody } from "./gh.js";
+import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
+import type { RiskStatus } from "./db.js";
+import { isIgnoredRepo } from "./classify.js";
+import { repoQueue } from "./queue.js";
+import { emit } from "./events.js";
 import type { RiskCandidate, RiskItem, RiskLevel, RiskVerdictRecord } from "./types.js";
 
 const LEVELS: RiskLevel[] = ["low", "medium", "high"];
@@ -54,10 +61,28 @@ export function parseRisksFile(raw: string): RiskCandidate[] {
       codeSnippet: o.codeSnippet,
     };
     if (typeof o.category === "string" && o.category.trim()) c.category = o.category;
+    if (typeof o.layer === "string" && o.layer.trim()) c.layer = o.layer;
+    if (typeof o.inDescription === "boolean") c.inDescription = o.inDescription;
     if (typeof o.mermaid === "string" && o.mermaid.trim()) c.mermaid = o.mermaid;
     out.push(c);
   }
   return out;
+}
+
+/**
+ * Author Blind spots track their own head-sha (`risks_head_sha`), decoupled from
+ * the overview (see the PR-resources spec: an author branch moves constantly, so
+ * a Blind spot shown against a stale sha is actively misleading). A finding is
+ * stale — and the panel should prompt a Regenerate rather than serve it — when
+ * the analyzed head differs from the live head. We can only PROVE drift when
+ * BOTH shas are known: no analysis head (never analyzed, or a reviewer risk that
+ * piggybacks the overview) or an unknown live head ⇒ not stale.
+ */
+export function blindSpotsStale(
+  risksHeadSha: string | null | undefined,
+  liveHeadSha: string | null | undefined
+): boolean {
+  return !!risksHeadSha && !!liveHeadSha && risksHeadSha !== liveHeadSha;
 }
 
 /**
@@ -181,6 +206,96 @@ Write EXACTLY a JSON ARRAY of verdict records to ${VERDICTS_FILE}, one per candi
 ]
 Include "level" ONLY when you are overriding the finder's severity. Write ONLY that file. Your final text message just states your confirm/dismiss counts.`;
 
+/**
+ * Author-role Blind-spot finder (see CONTEXT.md). Same finder→confirmer engine,
+ * but the framing changes: this is the AUTHOR's own PR, harm-hunting is primary,
+ * the PR body is an advisory lens, and findings are layer-tagged with a two-part
+ * materiality bar (invisible-at-PR-time AND manifests-at-a-distance).
+ */
+const AUTHOR_FINDER_SYSTEM = `You are reviewing the AUTHOR's OWN pull request to surface BLIND SPOTS — behaviors their change causes that they may not have intended or considered. You work in a read-only checkout of the PR branch. Investigate the ACTUAL code before deciding — never guess.
+
+You are given the PR's overview (what it does + its traced blast radius) as context, and the author's PR description as their CLAIMED SCOPE. Build on the overview — do not re-derive the diff.
+
+# What counts as a Blind spot — the TWO-PART materiality bar (BOTH required)
+A finding qualifies ONLY IF a wrong answer to its intent-question would cause harm that is:
+1. INVISIBLE AT PR TIME — not caught by CI or by reading this diff (a green build + right-looking diff still ships it). This EXCLUDES style/type-cast/naming nits (visible in the diff) and CI-catchable bugs (the gate handles those).
+2. MANIFESTS AWAY FROM THE CHANGE — the harm surfaces somewhere the author isn't looking: a dashboard, an experiment readout, a downstream data consumer, or a different code path — days/weeks later. This is the "drift-to-a-distance" signature.
+A plain in-diff bug (an off-by-one in the changed function itself) FAILS part 2 → out of scope; other tools cover those. Stay narrowly on drift that escapes to a distance.
+
+# Priority harm classes (guidance, not fixed buckets — fire where relevant, ignore where not)
+- Query / data health: a downstream query breaks — a field that can now be null, a type/cardinality change, a column a consumer depends on.
+- Metric fidelity: an event fires but won't reflect truth — fires on render not action, counts retries, no dedup, wrong grain (per-session vs per-user).
+- Experiment integrity: exposure logged before/outside the gate check (pollutes unenrolled users), control path mutated, wrong bucketing key, treatment leaks into holdout.
+
+# Layer split (do this FIRST, in your head)
+Partition the diff into ITS OWN layers — a www PR might be analytics / experiment / UI-UX / logic; another repo surfaces different ones. YOU name the layers from the code; nothing is hardcoded. Then hunt each layer. Tag every finding with its "layer".
+
+# Every finding is fact + fact + question (never a verdict)
+Decompose each Blind spot into: (fact) the code does X at file:line, (fact) X has downstream consequence Y, (question) did you intend X? Phrase "explanation" as a why-it-matters chain ending in a QUESTION ("…so it counts views after the API returns, not on tap. Intended?"). NEVER assert intent is wrong — you cannot see the author's head, only the code.
+
+# Grounding (mandatory)
+Investigate with Read/Grep/Glob/Bash and \`git diff origin/master...HEAD\`. Cite exact file/line(s). Build permalinks from the blob base pinned to the PR head: <base>/<path>#L<line>.
+
+# Output — write ${RISKS_FILE}
+Create \`overview/\` if needed, then write EXACTLY a JSON ARRAY:
+[
+  {
+    "id": "blindspot-1",
+    "title": "<one-line headline, phrased as the behavior>",
+    "level": "high" | "medium" | "low",
+    "layer": "<the layer you derived, e.g. analytics>",
+    "inDescription": true | false,                 // did the PR description claim this behavior?
+    "category": "query|metric|experiment|logic|other",
+    "location": { "path": "<repo-relative>", "startLine": <n>, "endLine": <n?>, "permalink": "<base>/<path>#L<n>" },
+    "explanation": "<why-it-matters chain ending in an intent QUESTION>",
+    "codeSnippet": "<fenced \`\`\`diff hunk (preferred) or plain code>",
+    "mermaid": "<optional; only for a ≥3-step flow>"
+  }
+]
+Write ONLY that file. If the change has no genuine blind spots, write \`[]\`. Your final text message just states how many you wrote.`;
+
+const AUTHOR_CONFIRMER_SYSTEM = `You are an ADVERSARIAL verifier of BLIND SPOTS raised about an author's own pull request. Confirm or dismiss each against the REAL code in this read-only checkout. Never guess — investigate.
+
+For EACH candidate, re-investigate with Read/Grep/Glob/Bash and \`git diff origin/master...HEAD\`. A blind spot survives ONLY if BOTH hold:
+- Its FACTS are real: the code does X (cite file:line), and X genuinely has the stated downstream consequence Y.
+- It clears the TWO-PART materiality bar: the harm is invisible at PR time AND manifests away from the change (dashboard / experiment / downstream consumer / other path). If the worst case is a nit, or the bug manifests in the diff itself, DISMISS it as out of scope.
+You judge FACTS and MATERIALITY only — never whether the author "intended" it (that stays an open question for them). Do NOT default to confirm here: an unproven fact or an immaterial consequence is a DISMISS, with a cited reason.
+
+# Output — write ${VERDICTS_FILE}
+Write EXACTLY a JSON ARRAY, one record per candidate, keyed by "id":
+[
+  { "id": "blindspot-1", "confirmed": true, "level": "high", "rationale": "<grounded: cite file:line + which materiality part holds>" }
+]
+Include "level" ONLY when overriding severity. Write ONLY that file.`;
+
+function buildAuthorFinderPrompt(
+  prKey: string,
+  title: string,
+  body: string,
+  blobBase: string,
+  overviewMd: string
+): string {
+  return [
+    `PR: ${prKey}`,
+    `Title: ${title}`,
+    `Repo blob base URL (pinned to PR head): ${blobBase}`,
+    `  Build permalinks as <base>/<path>#L<line>, e.g. ${blobBase}/src/index.ts#L42`,
+    "",
+    "Author's PR description (CLAIMED SCOPE — an advisory lens for inDescription, NOT a filter;",
+    "hunt harm regardless of what it says; if empty/thin, just harm-hunt):",
+    "<<<DESCRIPTION",
+    body?.trim() || "(none)",
+    "DESCRIPTION",
+    "",
+    "PR overview (context — build on it, do not repeat it):",
+    "<<<OVERVIEW",
+    overviewMd || "(none)",
+    "OVERVIEW",
+    "",
+    `Investigate the checkout, then write your grounded blind-spot array to ${RISKS_FILE}.`,
+  ].join("\n");
+}
+
 function buildFinderPrompt(prKey: string, title: string, blobBase: string, overviewMd: string): string {
   return [
     `PR: ${prKey}`,
@@ -228,9 +343,22 @@ export async function analyzeRisks(opts: {
   blobBase: string;
   overviewMd: string;
   maxTurns: number;
+  /**
+   * "reviewer" (default) = Verified Risk Analysis on someone else's PR.
+   * "author" = Blind-spot finding on the author's own PR (CONTEXT.md): harm-hunt
+   * framing, layer-tagged, PR `body` used as an advisory lens.
+   */
+  mode?: "reviewer" | "author";
+  /** The author's PR description — only consulted in "author" mode. */
+  body?: string;
 }): Promise<{ risks: RiskItem[]; status: "ready" | "failed" }> {
-  const { dir, prKey, title, blobBase, overviewMd, maxTurns } = opts;
-  const { env, modelArn } = await sdkEnv();
+  const { dir, prKey, title, blobBase, overviewMd, maxTurns, mode = "reviewer", body = "" } = opts;
+  const author = mode === "author";
+  // Reviewer Verified Risk Analysis is a read-only reviewer artifact → sonnet.
+  // Author Blind spots reason about the owner's own PR → default (opus).
+  const { env, modelArn } = await sdkEnv(
+    author ? undefined : loadConfig().overview.reviewerModelName
+  );
 
   // --- Finder pass ---
   await runAgent({
@@ -238,8 +366,10 @@ export async function analyzeRisks(opts: {
     env,
     modelArn,
     maxTurns,
-    system: FINDER_SYSTEM,
-    prompt: buildFinderPrompt(prKey, title, blobBase, overviewMd),
+    system: author ? AUTHOR_FINDER_SYSTEM : FINDER_SYSTEM,
+    prompt: author
+      ? buildAuthorFinderPrompt(prKey, title, body, blobBase, overviewMd)
+      : buildFinderPrompt(prKey, title, blobBase, overviewMd),
     allowWrite: true,
   });
 
@@ -262,7 +392,7 @@ export async function analyzeRisks(opts: {
       env,
       modelArn,
       maxTurns,
-      system: CONFIRMER_SYSTEM,
+      system: author ? AUTHOR_CONFIRMER_SYSTEM : CONFIRMER_SYSTEM,
       prompt: buildConfirmerPrompt(prKey, blobBase, JSON.stringify(candidates, null, 2)),
       allowWrite: true,
     });
@@ -302,4 +432,100 @@ async function runAgent(opts: {
   })) {
     void msg;
   }
+}
+
+// --- Author Blind spots: on-demand artifact (PR-resources spec, Phase 2) ---
+//
+// The author-role counterpart to reviewer Verified risks. Unlike reviewer risks
+// (produced synchronously inside the overview run), Blind spots are their OWN
+// on-demand artifact — modeled exactly on the quiz (`quiz.ts`): own head-sha for
+// staleness on a moving author branch, in-flight double-click guard, per-repo
+// SerialQueue for worktree collision-safety, and a `pr_risks_updated` SSE event.
+// Read-only w.r.t. GitHub (`dryRun` does not gate it).
+
+/**
+ * Run the author Blind-spot analysis for a PR and persist the artifact + the
+ * head it was built against. Provisions its OWN read-only `skipDeps` worktree at
+ * the same PR-level negative key as the overview (`-pr.number`), so it must run
+ * through the shared per-repo queue (see `requestBlindSpots`). Never crashes the
+ * daemon — a failed run lands `failed` on the row. Requires an existing overview
+ * (the finder is grounded on it, matching the reviewer path).
+ */
+export async function generateBlindSpots(
+  prKey: string
+): Promise<{ risks: RiskItem[]; status: RiskStatus; headSha: string }> {
+  const pr = getPrOverview(prKey);
+  if (!pr) throw new Error(`no PR ${prKey}`);
+  const cfg = loadConfig();
+
+  const head = await getPrHead(pr.owner, pr.repo, pr.number);
+  const body = await getPrBody(pr.owner, pr.repo, pr.number);
+  const blobBase = `https://github.com/${pr.owner}/${pr.repo}/blob/${head.headSha}`;
+  const wtKey = -pr.number;
+  const { dir } = await addWorktree(pr.owner, pr.repo, head.headRefName, wtKey, {
+    skipDeps: true,
+  });
+  try {
+    const r = await analyzeRisks({
+      dir,
+      prKey,
+      title: pr.title,
+      body,
+      blobBase,
+      overviewMd: pr.overviewMd ?? "",
+      maxTurns: cfg.overview.maxTurns,
+      mode: "author",
+    });
+    const result = { risks: r.risks, status: r.status as RiskStatus, headSha: head.headSha };
+    updatePrOverview(prKey, {
+      risks: result.risks,
+      risksStatus: result.status,
+      risksHeadSha: result.headSha,
+    });
+    return result;
+  } finally {
+    await removeWorktree(pr.owner, pr.repo, wtKey).catch(() => {});
+  }
+}
+
+/** PRs with a Blind-spot generation currently running — the double-click guard. */
+const inFlight = new Set<string>();
+
+/**
+ * Fire-and-forget entry point for the API/dashboard: mark the PR risks
+ * `generating`, run generation inside the shared per-repo SerialQueue (worktree
+ * collision-safety with the overview, which shares the `-pr.number` key), and
+ * emit `pr_risks_updated` around it. Author-role only. Requires an existing
+ * overview. Never throws to the caller — failures land on the row as `failed`.
+ */
+export function requestBlindSpots(prKey: string): { ok: boolean; reason?: string } {
+  const cfg = loadConfig();
+  if (!cfg.overview.enabled) return { ok: false, reason: "overview feature disabled" };
+  const pr = getPrOverview(prKey);
+  if (!pr) return { ok: false, reason: "no such PR" };
+  if (pr.role !== "author") return { ok: false, reason: "blind spots are author-only" };
+  if (isIgnoredRepo(pr.owner, pr.repo)) return { ok: false, reason: "repo not in scope" };
+  if (!pr.overviewMd) return { ok: false, reason: "generate an overview first" };
+  if (inFlight.has(prKey) || pr.risksStatus === "generating") {
+    return { ok: false, reason: "already generating" };
+  }
+
+  inFlight.add(prKey);
+  updatePrOverview(prKey, { risksStatus: "generating" });
+  logEvent(null, "risks", `${prKey}: generating…`);
+  emit({ type: "pr_risks_updated", prKey });
+
+  void repoQueue.run(`${pr.owner}/${pr.repo}`, async () => {
+    try {
+      const r = await generateBlindSpots(prKey);
+      logEvent(null, "risks", `${prKey}: ${r.status} (blind spots=${r.risks.length})`);
+    } catch (err: any) {
+      updatePrOverview(prKey, { risksStatus: "failed" });
+      logEvent(null, "risks_error", `${prKey}: ${err?.message ?? String(err)}`);
+    } finally {
+      inFlight.delete(prKey);
+      emit({ type: "pr_risks_updated", prKey });
+    }
+  });
+  return { ok: true };
 }

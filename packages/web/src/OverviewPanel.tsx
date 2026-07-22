@@ -8,7 +8,13 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import type { PrOverview } from "./types";
-import { askPrQuestion, fetchPrOverview, generatePrOverview, generatePrQuiz } from "./api";
+import {
+  askPrQuestion,
+  fetchPrOverview,
+  generatePrBlindSpots,
+  generatePrOverview,
+  generatePrQuiz,
+} from "./api";
 import { Markdown } from "./Markdown";
 import { DiagramSet } from "./DiagramSet";
 import { RisksPanel } from "./RisksPanel";
@@ -32,6 +38,7 @@ export function OverviewPanel({
   const [ov, setOv] = useState<PrOverview | null>(null);
   const [loading, setLoading] = useState(false);
   const [quizBusy, setQuizBusy] = useState(false);
+  const [blindSpotsBusy, setBlindSpotsBusy] = useState(false);
 
   const load = useCallback(() => {
     fetchPrOverview(prKey)
@@ -89,6 +96,16 @@ export function OverviewPanel({
       load();
     } finally {
       setQuizBusy(false);
+    }
+  };
+
+  const runBlindSpots = async () => {
+    setBlindSpotsBusy(true);
+    try {
+      await generatePrBlindSpots(prKey);
+      load();
+    } finally {
+      setBlindSpotsBusy(false);
     }
   };
 
@@ -175,10 +192,21 @@ export function OverviewPanel({
           {hasDiagrams && <DiagramSet prKey={prKey} diagrams={ov.diagrams} />}
           <Markdown>{ov.overviewMd}</Markdown>
 
-          {/* Verified Risk Analysis — reviewer PRs only (produced by the same
-              Generate run). Confirmed/unverified as cards, dismissed collapsed. */}
-          {ov.role === "reviewer" && (
+          {/* Risk analysis. Reviewer PRs: Verified risks produced by the same
+              Generate run (no button). Author PRs: on-demand Blind spots with
+              their own Generate control, grounded on the overview above. */}
+          {ov.role === "reviewer" ? (
             <RisksPanel risks={ov.risks ?? []} status={ov.risksStatus} />
+          ) : (
+            <RisksPanel
+              risks={ov.risks ?? []}
+              status={ov.risksStatus}
+              mode="author"
+              stale={!!ov.risksStale}
+              hasOverview={!!ov.overviewMd}
+              busy={blindSpotsBusy}
+              onGenerate={runBlindSpots}
+            />
           )}
 
           {/* PR-comprehension quiz — its own on-demand agent run, grounded on the

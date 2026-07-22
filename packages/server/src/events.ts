@@ -9,6 +9,9 @@ export type AppEvent =
   | { type: "pr_overview_updated"; prKey: string }
   // PR-level quiz artifact progressed. Keyed by prKey, like the overview event.
   | { type: "pr_quiz_updated"; prKey: string }
+  // PR-level risk artifact progressed — author Blind spots (on-demand). Keyed by
+  // prKey, like the overview/quiz events.
+  | { type: "pr_risks_updated"; prKey: string }
   | { type: "notification"; prKey: string; threadId: number; message: string };
 
 const bus = new EventEmitter();

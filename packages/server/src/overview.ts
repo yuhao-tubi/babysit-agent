@@ -104,13 +104,7 @@ Why this PR exists — the problem, motivation, or requirement it addresses (2�
 ## What
 What is included and its impact — the core files/behaviors that carry the change, as bullets.
 ## How
-How it works — the relationship between the CHANGED files and the AFFECTED (traced-by-grep) code. If nothing depends on the change, say so.${
-    role === "reviewer"
-      ? ""
-      : `
-## Risks / things to review
-What a reviewer should scrutinize. State briefly what you INCLUDED vs. OMITTED from the diagrams so the scoping is reviewable.`
-  }
+How it works — the relationship between the CHANGED files and the AFFECTED (traced-by-grep) code. If nothing depends on the change, say so.
 
 # Rules
 - Work efficiently within your turn budget: investigate, then draw+render+fix each canvas. Don't explore exhaustively once the shape and blast radius are clear.
@@ -239,7 +233,11 @@ export async function generateOverview(prKey: string): Promise<OverviewResult> {
   try {
     let last = "";
     let endSubtype = "";
-    const { env, modelArn } = await sdkEnv();
+    // Reviewer overviews are read-only, reviewer-facing artifacts → sonnet for
+    // speed. Author overviews stay on the default (opus). See OverviewConfig.
+    const { env, modelArn } = await sdkEnv(
+      pr.role === "reviewer" ? cfg.overview.reviewerModelName : undefined
+    );
     // Optional transcript capture for debugging a generation. When
     // BABYSIT_OVERVIEW_TRACE points at a file, every SDK message is appended as
     // JSONL so we can audit why a run finished without writing the manifest.
@@ -382,7 +380,8 @@ export async function answerQuestion(prKey: string, question: string): Promise<A
     let assistantText = "";
     let last = "";
     let endSubtype = "";
-    const { env, modelArn } = await sdkEnv();
+    // Q&A is a read-only, ask-flow artifact → always sonnet, regardless of role.
+    const { env, modelArn } = await sdkEnv(cfg.overview.reviewerModelName);
     for await (const msg of query({
       prompt: buildQaPrompt(pr, question),
       options: {

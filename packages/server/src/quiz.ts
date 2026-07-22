@@ -139,7 +139,8 @@ export async function generateQuiz(prKey: string): Promise<QuizResult> {
   });
   try {
     let endSubtype = "";
-    const { env, modelArn } = await sdkEnv();
+    // The PR-comprehension quiz is a read-only, reviewer-facing artifact → sonnet.
+    const { env, modelArn } = await sdkEnv(cfg.overview.reviewerModelName);
     for await (const msg of query({
       prompt: buildQuizPrompt(pr),
       options: {

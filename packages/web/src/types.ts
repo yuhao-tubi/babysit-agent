@@ -65,14 +65,24 @@ export interface QuizQuestion {
 
 export type RiskLevel = "low" | "medium" | "high";
 export type RiskState = "confirmed" | "dismissed" | "unverified";
-export type RiskStatus = "ready" | "failed";
+// `generating` is used only by author Blind spots (an on-demand artifact like the
+// quiz); reviewer risks only ever land `ready`/`failed`.
+export type RiskStatus = "generating" | "ready" | "failed";
 
-/** A merged, display-ready risk from the Verified Risk Analysis (reviewer PRs). */
+/**
+ * A merged, display-ready risk: a reviewer Verified risk OR an author Blind spot
+ * (same shape; role drives the framing). `layer`/`inDescription` are set only for
+ * author Blind spots (see CONTEXT.md).
+ */
 export interface RiskItem {
   id: string;
   title: string;
   level: RiskLevel;
   category?: string;
+  /** Author Blind spots: the LLM-derived layer (e.g. "analytics"). Absent for reviewer risks. */
+  layer?: string;
+  /** Author Blind spots (advisory): false when the PR description didn't claim this behavior. */
+  inDescription?: boolean;
   location: { path: string; startLine: number; endLine?: number; permalink: string };
   explanation: string;
   codeSnippet: string;
@@ -96,10 +106,15 @@ export interface PrOverview {
   /** When the owner last hand-edited+saved a canvas (null = never). */
   diagramsEditedAt: string | null;
   stale: boolean;
-  /** Verified Risk Analysis (reviewer PRs): merged items ([] otherwise). */
+  /**
+   * Risk analysis — reviewer Verified risks or author Blind spots. Withheld ([])
+   * while generating and when stale (author head moved).
+   */
   risks: RiskItem[];
-  /** `ready`|`failed`|null (never run / author PR). */
+  /** `generating`|`ready`|`failed`|null (never run). */
   risksStatus: RiskStatus | null;
+  /** True when the author Blind spots' head has moved (Regenerate). Always false for reviewer risks. */
+  risksStale: boolean;
   /** PR-comprehension quiz — questions ([] when generating/failed/stale). */
   quiz: QuizQuestion[];
   /** `generating`|`ready`|`failed`|null (never run). */
