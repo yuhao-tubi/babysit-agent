@@ -104,6 +104,10 @@ setup: ## Interactive native setup wizard (prompts + validates creds, writes ./.
 doctor: ## Validate the existing ./.env + ./config.json creds non-interactively
 	npx tsx packages/server/src/setup.ts doctor
 
+.PHONY: recover
+recover: ## Probe base clones for corruption; print recovery commands (deletes nothing)
+	npx tsx packages/server/src/setup.ts recover
+
 .PHONY: dev
 dev: ## Run the daemon in the foreground (tsx watch; Ctrl-C to stop)
 	npm run dev:server
