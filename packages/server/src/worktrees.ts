@@ -155,7 +155,7 @@ export async function addWorktree(
   repo: string,
   headRef: string,
   threadId: number,
-  opts: { skipDeps?: boolean } = {}
+  opts: { skipDeps?: boolean; lightDeps?: boolean } = {}
 ): Promise<Worktree> {
   const base = await ensureBase(owner, repo);
   const wt = worktreePath(owner, repo, threadId);
@@ -174,7 +174,7 @@ export async function addWorktree(
   // tests, so provisioning deps — a CoW clone of a multi-GB node_modules plus a
   // possible top-up install — is pure waste. Skip it for them.
   if (!opts.skipDeps) {
-    await shareDeps(base, wt);
+    await shareDeps(base, wt, { light: opts.lightDeps });
     await seedBuildArtifacts(base, wt);
   }
   return { dir: wt, remoteSha };
@@ -218,12 +218,65 @@ async function seedBuildArtifacts(base: string, wt: string): Promise<void> {
 }
 
 /**
+ * All dependency names declared in a checkout's `package.json` (deps +
+ * devDeps + optionalDeps). These are clean import specifiers — unlike a
+ * yarn.lock header, which mangles them into alias forms — so they map directly
+ * to a `node_modules/<name>` directory. Returns null when there's no readable
+ * package.json (treated as "can't prove safe" by the caller).
+ */
+function declaredDeps(dir: string): string[] | null {
+  const p = join(dir, "package.json");
+  if (!existsSync(p)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(p, "utf8"));
+    return Object.keys({
+      ...(pkg.dependencies ?? {}),
+      ...(pkg.devDependencies ?? {}),
+      ...(pkg.optionalDependencies ?? {}),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when EVERY package the worktree declares is already present in the base
+ * `node_modules`. A patch/minor version bump of an existing package leaves the
+ * package directory present (only its contents differ), which is fine for a
+ * typecheck/lint gate — the `.d.ts` shape is stable across such bumps. The only
+ * case a symlinked base tree can't satisfy is a package the PR ADDS that base
+ * never installed → `TS2307: Cannot find module`. So "all declared deps present
+ * in base" is the safe-to-symlink condition for the light gate. A scoped `@x/y`
+ * dep lives at `node_modules/@x/y`; `join` handles the slash.
+ */
+export function allDepsPresentInBase(base: string, wt: string): boolean {
+  const deps = declaredDeps(wt);
+  if (!deps) return false; // can't prove safe → caller falls back to copy
+  const baseNm = join(base, "node_modules");
+  return deps.every((name) => existsSync(join(baseNm, name)));
+}
+
+/**
  * Make the base's installed dependencies available in the worktree. Common case
  * (PR doesn't touch deps): symlink the base node_modules. Divergent lockfile:
  * APFS copy-on-write clone + top-up install local to the worktree, so we never
  * mutate the shared base node_modules.
+ *
+ * `light` (owner-reviewed proposals whose gate only typechecks/lints changed
+ * source — see gate.ts runLightGate): symlink even when the lockfile diverged,
+ * SO LONG AS every package the PR declares is already installed in base. This
+ * skips the multi-GB CoW copy + full `yarn install` that a single version bump
+ * (e.g. one @adrise/* patch) would otherwise force, since a typecheck/lint gate
+ * doesn't depend on exact dep VERSIONS — only on the modules being resolvable.
+ * A PR that adds a brand-new dependency still takes the copy+install path. NOT
+ * used for CI-fix / full-gate threads, which run the real test suite and need
+ * the exact installed versions.
  */
-async function shareDeps(base: string, wt: string): Promise<void> {
+async function shareDeps(
+  base: string,
+  wt: string,
+  opts: { light?: boolean } = {}
+): Promise<void> {
   const baseNm = join(base, "node_modules");
   if (!existsSync(baseNm)) return; // nothing provisioned (non-node repo)
 
@@ -232,6 +285,14 @@ async function shareDeps(base: string, wt: string): Promise<void> {
 
   if (wtHash && baseHash && wtHash === baseHash) {
     // Identical deps → symlink (read-only share; never installed into).
+    symlinkSync(baseNm, join(wt, "node_modules"), "dir");
+    return;
+  }
+
+  // Light gate + only version bumps of already-installed packages → symlink base
+  // deps and skip the copy/install entirely (see doc comment). A newly-ADDED dep
+  // fails the presence check and falls through to the copy path below.
+  if (opts.light && allDepsPresentInBase(base, wt)) {
     symlinkSync(baseNm, join(wt, "node_modules"), "dir");
     return;
   }
@@ -360,13 +421,33 @@ export async function applyPatch(dir: string, diff: string): Promise<void> {
   }
 }
 
+/**
+ * Commit identity, derived from `githubLogin` — NOT read from ambient git config.
+ * Native runs inherit the host's `user.name`/`user.email`, but a fresh container
+ * has none and `git commit` would abort with "Please tell me who you are". We
+ * pass the identity explicitly so auto-fix commits are attributed consistently on
+ * every run path. The email uses GitHub's `<login>@users.noreply.github.com`
+ * form, which GitHub links back to the account without exposing a real address.
+ */
+function commitIdentityArgs(): string[] {
+  const { githubLogin } = loadConfig();
+  return [
+    "-c",
+    `user.name=${githubLogin}`,
+    "-c",
+    `user.email=${githubLogin}@users.noreply.github.com`,
+  ];
+}
+
 export async function commitAll(dir: string, message: string): Promise<void> {
   await git(dir, ["add", "-A"]);
   // --no-verify skips the repo's client-side git hooks (e.g. husky pre-commit).
   // Those hooks assume `husky install` ran (`.husky/_/husky.sh` exists), which it
   // never does in a throwaway worktree, so they'd abort the commit. Our pre-push
   // gate already self-verifies build/test/lint, so the hooks are redundant here.
-  await git(dir, ["commit", "--no-verify", "-m", message]);
+  // Identity is passed explicitly (see commitIdentityArgs) so this works with no
+  // ambient git config (e.g. in the container).
+  await git(dir, [...commitIdentityArgs(), "commit", "--no-verify", "-m", message]);
 }
 
 /** Fast-forward-only push (no --force): git rejects a non-fast-forward push. */

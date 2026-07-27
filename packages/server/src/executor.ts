@@ -210,7 +210,13 @@ async function proposeCode(
   const ciLogPath = isCi ? await materializeCiLog(s) : null;
 
   const head = await getPrHead(s.owner, s.repo, s.number);
-  const { dir, remoteSha } = await addWorktree(s.owner, s.repo, head.headRefName, s.id);
+  // lightDeps: a non-CI fix is verified by the LIGHT gate (typecheck/lint of the
+  // changed files), which doesn't need exact dep versions — so shareDeps may
+  // symlink base node_modules instead of a multi-GB copy when the PR only bumped
+  // already-installed packages. CI fixes run the real suite → full copy+install.
+  const { dir, remoteSha } = await addWorktree(s.owner, s.repo, head.headRefName, s.id, {
+    lightDeps: !isCi,
+  });
   const baseSha = remoteSha;
   try {
     // Fix→gate loop. The agent makes the change, then the gate runs; if the
@@ -452,7 +458,14 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     return "blocked";
   }
   const head = await getPrHead(s.owner, s.repo, s.number);
-  const { dir, remoteSha } = await addWorktree(s.owner, s.repo, head.headRefName, s.id);
+  // lightDeps: this approve re-gates a non-CI proposal with the LIGHT gate
+  // (typecheck/lint of changed files), which doesn't need exact dep versions —
+  // so shareDeps may symlink base node_modules instead of a multi-GB copy when
+  // the PR only bumped already-installed packages. CI fixes run the real suite,
+  // so they keep the full copy+install.
+  const { dir, remoteSha } = await addWorktree(s.owner, s.repo, head.headRefName, s.id, {
+    lightDeps: s.authorClass !== "ci",
+  });
   try {
     // Does the reviewed diff still land on today's tree?
     if (!(await applyPatchCheck(dir, proposal.diff))) {
