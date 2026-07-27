@@ -218,11 +218,20 @@ async function seedBuildArtifacts(base: string, wt: string): Promise<void> {
 }
 
 /**
- * All dependency names declared in a checkout's `package.json` (deps +
- * devDeps + optionalDeps). These are clean import specifiers — unlike a
- * yarn.lock header, which mangles them into alias forms — so they map directly
+ * Dependency names declared in a checkout's `package.json` that MUST resolve —
+ * `dependencies` + `devDependencies`. These are clean import specifiers (unlike
+ * a yarn.lock header, which mangles them into alias forms), so they map directly
  * to a `node_modules/<name>` directory. Returns null when there's no readable
  * package.json (treated as "can't prove safe" by the caller).
+ *
+ * `optionalDependencies` are DELIBERATELY excluded: a package's cross-platform
+ * native variants ship as optional deps (e.g. @statsig/statsig-node-core has one
+ * entry per os/arch), and the installer only materializes the ONE matching the
+ * host — every other platform's variant is legitimately absent on any given
+ * machine. Counting those as "missing" made the presence check fail for nearly
+ * every real PR (they all carry such optionals), so shareDeps never took the
+ * symlink fast path. An optional dep being absent never breaks a typecheck/lint
+ * gate, so it must not force the expensive copy+install.
  */
 function declaredDeps(dir: string): string[] | null {
   const p = join(dir, "package.json");
@@ -232,7 +241,6 @@ function declaredDeps(dir: string): string[] | null {
     return Object.keys({
       ...(pkg.dependencies ?? {}),
       ...(pkg.devDependencies ?? {}),
-      ...(pkg.optionalDependencies ?? {}),
     });
   } catch {
     return null;

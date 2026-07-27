@@ -12,8 +12,16 @@ function scratch(): string {
   return mkdtempSync(join(tmpdir(), "babysit-wt-test-"));
 }
 
-function writePkg(dir: string, deps: Record<string, string>, dev: Record<string, string> = {}): void {
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: deps, devDependencies: dev }));
+function writePkg(
+  dir: string,
+  deps: Record<string, string>,
+  dev: Record<string, string> = {},
+  optional: Record<string, string> = {}
+): void {
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ dependencies: deps, devDependencies: dev, optionalDependencies: optional })
+  );
 }
 
 function installInBase(base: string, names: string[]): void {
@@ -52,6 +60,26 @@ test("devDependencies are checked too", () => {
   installInBase(base, ["react"]);
   writePkg(wt, { react: "^18.0.0" }, { "missing-dev-tool": "^1.0.0" });
   assert.equal(allDepsPresentInBase(base, wt), false);
+});
+
+test("absent optionalDependencies do NOT force a copy (cross-platform native variants)", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react", "@statsig/statsig-node-core-darwin-arm64"]);
+  // The PR declares native variants for every platform as optionalDependencies;
+  // only the host's variant is installed in base. The others are legitimately
+  // absent and must not trip the presence check into a full copy.
+  writePkg(
+    wt,
+    { react: "^18.0.0" },
+    {},
+    {
+      "@statsig/statsig-node-core-darwin-arm64": "^1.0.0",
+      "@statsig/statsig-node-core-linux-x64-gnu": "^1.0.0",
+      "@statsig/statsig-node-core-linux-arm64-musl": "^1.0.0",
+    }
+  );
+  assert.equal(allDepsPresentInBase(base, wt), true);
 });
 
 test("no package.json in worktree → can't prove safe, returns false", () => {
