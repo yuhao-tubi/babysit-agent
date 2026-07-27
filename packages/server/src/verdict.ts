@@ -277,8 +277,15 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
   }
 
   // Read-only investigation runs in a worktree on the PR head (not master), so
-  // the agent sees the actual PR code. Torn down in `finally`.
-  const { dir } = await addWorktree(s.owner, s.repo, head.headRefName, s.id);
+  // the agent sees the actual PR code. Torn down in `finally`. `skipDeps`: the
+  // verdict only Reads/Greps/Globs the source to ground a decision — it never
+  // builds or runs tests (that's the gate's job later), so provisioning deps (a
+  // multi-GB CoW copy + top-up install) is pure waste that would hold the serial
+  // repo queue for minutes and stall every owner action on the repo. Matches the
+  // other read-only consumers (overview/risks/quiz).
+  const { dir } = await addWorktree(s.owner, s.repo, head.headRefName, s.id, {
+    skipDeps: true,
+  });
   const blobBase = `https://github.com/${s.owner}/${s.repo}/blob/${head.headSha}`;
   try {
     // `result` only carries text on a `success` result; an `error_max_turns`

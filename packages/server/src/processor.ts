@@ -137,11 +137,16 @@ export async function processThread(id: number): Promise<void> {
 export async function applyInstruction(id: number, instruction: string): Promise<void> {
   const s = getThread(id);
   if (!s) throw new Error(`no thread #${id}`);
+  // Reflect the click SYNCHRONOUSLY — before entering the serial queue — so a
+  // refresh reads the working state even while this job waits behind other
+  // in-flight repo work (mirrors approveThread). This is a Group-2 action: it
+  // runs a fix agent in a worktree, so it MUST stay on the queue; the pre-flip is
+  // what keeps it from looking dead while queued.
+  updateThread(id, { status: "in_progress", error: null });
+  emit({ type: "thread_updated", threadId: id });
   await queue.run(`${s.owner}/${s.repo}`, async () => {
     const fresh = getThread(id);
     if (!fresh) return;
-    updateThread(id, { status: "in_progress", error: null });
-    emit({ type: "thread_updated", threadId: id });
     try {
       const verdict = fresh.verdictJson
         ? JSON.parse(fresh.verdictJson)
@@ -223,18 +228,19 @@ export async function approveReply(id: number): Promise<void> {
 export async function dismissReply(id: number): Promise<void> {
   const s = getThread(id);
   if (!s) throw new Error(`no thread #${id}`);
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
-    const fresh = getThread(id);
-    if (!fresh || !fresh.proposalJson) return;
-    try {
-      const status = await dismissReplyProposal(fresh);
-      finalize(id, status);
-    } catch (err: any) {
-      logEvent(id, "error", err?.message ?? String(err));
-      updateThread(id, { status: "error", error: err?.message ?? String(err) });
-      emit({ type: "thread_updated", threadId: id });
-    }
-  });
+  // NOT on the repo queue (see replyDirect): dismissing only mutates the frozen
+  // proposal in the DB row — no worktree, no GitHub write — so it runs inline and
+  // stays responsive behind long repo-queue work.
+  const fresh = getThread(id);
+  if (!fresh || !fresh.proposalJson) return;
+  try {
+    const status = await dismissReplyProposal(fresh);
+    finalize(id, status);
+  } catch (err: any) {
+    logEvent(id, "error", err?.message ?? String(err));
+    updateThread(id, { status: "error", error: err?.message ?? String(err) });
+    emit({ type: "thread_updated", threadId: id });
+  }
 }
 
 /**
@@ -249,25 +255,26 @@ export async function replyDirect(id: number, body: string): Promise<void> {
   const text = body.trim();
   if (!text) return;
   const cfg = loadConfig();
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
-    const fresh = getThread(id);
-    if (!fresh) return;
-    updateThread(id, { status: "in_progress", error: null });
-    emit({ type: "thread_updated", threadId: id });
-    try {
-      if (cfg.dryRun) {
-        logEvent(id, "dry_run", `would reply: ${text}`);
-      } else {
-        await postReply(fresh, getThreadItems(id), text);
-        logEvent(id, "replied", text);
-      }
-      finalize(id, "resolved");
-    } catch (err: any) {
-      logEvent(id, "error", err?.message ?? String(err));
-      updateThread(id, { status: "error", error: err?.message ?? String(err) });
-      emit({ type: "thread_updated", threadId: id });
+  // NOT on the repo queue: a direct reply only posts a GitHub comment + updates
+  // the DB row — it touches no worktree, so the queue's "one clone edited at a
+  // time" invariant doesn't apply. Running it inline keeps the owner's click
+  // responsive even while a long verdict/fix job holds the repo queue. Outcome
+  // (resolved/error) reaches the UI via the emitted `thread_updated` event.
+  const fresh = getThread(id);
+  if (!fresh) return;
+  try {
+    if (cfg.dryRun) {
+      logEvent(id, "dry_run", `would reply: ${text}`);
+    } else {
+      await postReply(fresh, getThreadItems(id), text);
+      logEvent(id, "replied", text);
     }
-  });
+    finalize(id, "resolved");
+  } catch (err: any) {
+    logEvent(id, "error", err?.message ?? String(err));
+    updateThread(id, { status: "error", error: err?.message ?? String(err) });
+    emit({ type: "thread_updated", threadId: id });
+  }
 }
 
 /**
@@ -278,28 +285,29 @@ export async function resolveThread(id: number): Promise<void> {
   const s = getThread(id);
   if (!s) throw new Error(`no thread #${id}`);
   const cfg = loadConfig();
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
-    const fresh = getThread(id);
-    if (!fresh) return;
-    try {
-      // Only inline review-comment threads have a resolvable GitHub thread.
-      const rootId = fresh.threadKey.match(/^thread:(\d+)$/)?.[1];
-      if (rootId) {
-        if (cfg.dryRun) {
-          logEvent(id, "dry_run", `would resolve GitHub thread ${fresh.threadKey}`);
-        } else {
-          const ok = await resolveReviewThread(fresh.owner, fresh.repo, fresh.number, Number(rootId));
-          logEvent(id, ok ? "gh_resolved" : "gh_resolve_miss", fresh.threadKey);
-        }
+  // NOT on the repo queue (see replyDirect): resolving only calls `gh` to resolve
+  // the review thread + updates the DB row — no worktree is touched, so it runs
+  // inline and stays responsive behind long repo-queue work.
+  const fresh = getThread(id);
+  if (!fresh) return;
+  try {
+    // Only inline review-comment threads have a resolvable GitHub thread.
+    const rootId = fresh.threadKey.match(/^thread:(\d+)$/)?.[1];
+    if (rootId) {
+      if (cfg.dryRun) {
+        logEvent(id, "dry_run", `would resolve GitHub thread ${fresh.threadKey}`);
+      } else {
+        const ok = await resolveReviewThread(fresh.owner, fresh.repo, fresh.number, Number(rootId));
+        logEvent(id, ok ? "gh_resolved" : "gh_resolve_miss", fresh.threadKey);
       }
-      logEvent(id, "manual_resolved", "marked resolved by user");
-      finalize(id, "resolved");
-    } catch (err: any) {
-      logEvent(id, "error", err?.message ?? String(err));
-      updateThread(id, { status: "error", error: err?.message ?? String(err) });
-      emit({ type: "thread_updated", threadId: id });
     }
-  });
+    logEvent(id, "manual_resolved", "marked resolved by user");
+    finalize(id, "resolved");
+  } catch (err: any) {
+    logEvent(id, "error", err?.message ?? String(err));
+    updateThread(id, { status: "error", error: err?.message ?? String(err) });
+    emit({ type: "thread_updated", threadId: id });
+  }
 }
 
 /**
@@ -314,12 +322,16 @@ export async function retryThread(id: number): Promise<void> {
   const s = getThread(id);
   if (!s) throw new Error(`no thread #${id}`);
   if (!s.proposalJson) return rerunThread(id); // no frozen artifact → recompute
+  // Reflect the click SYNCHRONOUSLY — before entering the serial queue (mirrors
+  // approveThread/applyInstruction) — so a queued retry doesn't look dead while it
+  // waits behind other in-flight repo work. Group-2 action: re-applies the frozen
+  // proposal in a worktree, so it MUST stay on the queue.
+  updateThread(id, { status: "in_progress", error: null });
+  logEvent(id, "retry", "re-applying frozen proposal");
+  emit({ type: "thread_updated", threadId: id });
   await queue.run(`${s.owner}/${s.repo}`, async () => {
     const fresh = getThread(id);
     if (!fresh || !fresh.proposalJson) return;
-    updateThread(id, { status: "in_progress", error: null });
-    logEvent(id, "retry", "re-applying frozen proposal");
-    emit({ type: "thread_updated", threadId: id });
     try {
       const status = await approveProposal(fresh);
       finalize(id, status);
