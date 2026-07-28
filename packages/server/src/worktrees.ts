@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { runRepoSetup } from "./repo-setup.js";
+import { withBaseLock } from "./queue.js";
 
 const exec = promisify(execFile);
 
@@ -157,22 +158,36 @@ export async function addWorktree(
   threadId: number,
   opts: { skipDeps?: boolean; lightDeps?: boolean } = {}
 ): Promise<Worktree> {
-  const base = await ensureBase(owner, repo);
   const wt = worktreePath(owner, repo, threadId);
 
-  // Clear any stale worktree at this path first (crash/restart residue).
-  await removeWorktree(owner, repo, threadId);
-  mkdirSync(worktreesDir(owner, repo), { recursive: true });
+  // Everything that touches the SHARED base `.git` (ensureBase's fetch/checkout/
+  // reset, the stale-worktree cleanup, the head fetch, and `worktree add`) runs
+  // under a per-repo base lock. Thread work and artifact generation now use
+  // separate queues that run concurrently, so without this two `addWorktree`
+  // calls could mutate the same base clone's index/refs at once and hit git's
+  // own lock errors. The lock covers ONLY this short git critical section; the
+  // long, per-worktree-directory work below (dep sharing, artifact seeding, and
+  // the caller's agent run) stays outside it so generations still parallelize.
+  const { base, remoteSha } = await withBaseLock(`${owner}/${repo}`, async () => {
+    const base = await ensureBase(owner, repo);
+    // Clear any stale worktree at this path first (crash/restart residue).
+    // Unlocked variant: we already hold the base lock here (non-reentrant).
+    await removeWorktreeUnlocked(owner, repo, threadId);
+    mkdirSync(worktreesDir(owner, repo), { recursive: true });
 
-  await git(base, ["fetch", "origin", headRef, "--prune"]);
-  // Detached at the PR head sha: avoids the one-branch-per-worktree restriction
-  // entirely, and we push by explicit refspec (HEAD:headRef) anyway.
-  await git(base, ["worktree", "add", "--detach", wt, `origin/${headRef}`]);
-  const remoteSha = await git(wt, ["rev-parse", "HEAD"]);
+    await git(base, ["fetch", "origin", headRef, "--prune"]);
+    // Detached at the PR head sha: avoids the one-branch-per-worktree restriction
+    // entirely, and we push by explicit refspec (HEAD:headRef) anyway.
+    await git(base, ["worktree", "add", "--detach", wt, `origin/${headRef}`]);
+    const remoteSha = await git(wt, ["rev-parse", "HEAD"]);
+    return { base, remoteSha };
+  });
 
   // Read-only consumers (e.g. the PR-overview investigation) never build or run
   // tests, so provisioning deps — a CoW clone of a multi-GB node_modules plus a
-  // possible top-up install — is pure waste. Skip it for them.
+  // possible top-up install — is pure waste. Skip it for them. This works in the
+  // per-id worktree dir only (base node_modules is read as a symlink/CoW source),
+  // so it is safe outside the base lock.
   if (!opts.skipDeps) {
     await shareDeps(base, wt, { light: opts.lightDeps });
     await seedBuildArtifacts(base, wt);
@@ -326,8 +341,13 @@ async function shareDeps(
   }
 }
 
-/** Remove a worktree and its directory. Safe to call when nothing exists. */
-export async function removeWorktree(
+/**
+ * Remove a worktree and its directory — the base-git critical section, WITHOUT
+ * taking the base lock. Call this only from a context that already holds the
+ * lock (e.g. inside `addWorktree`'s locked section) to avoid a self-deadlock,
+ * since the lock is non-reentrant.
+ */
+async function removeWorktreeUnlocked(
   owner: string,
   repo: string,
   threadId: number
@@ -349,6 +369,21 @@ export async function removeWorktree(
       /* best-effort */
     }
   }
+}
+
+/**
+ * Remove a worktree and its directory. Safe to call when nothing exists. Takes
+ * the per-repo base lock (it mutates the shared `.git` via `worktree remove` /
+ * `prune`) so it can't race a concurrent `addWorktree` on the same repo — the
+ * executor calls this from its `finally` while other queue's work may be
+ * provisioning a worktree for the same repo.
+ */
+export async function removeWorktree(
+  owner: string,
+  repo: string,
+  threadId: number
+): Promise<void> {
+  await withBaseLock(`${owner}/${repo}`, () => removeWorktreeUnlocked(owner, repo, threadId));
 }
 
 /**

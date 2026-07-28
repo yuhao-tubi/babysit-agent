@@ -8,7 +8,7 @@ import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
 import type { PrOverview } from "./db.js";
 import type { DiagramSection, DiagramSet, RiskItem } from "./types.js";
 import { isIgnoredRepo } from "./classify.js";
-import { repoQueue } from "./queue.js";
+import { overviewQueue } from "./queue.js";
 import { emit } from "./events.js";
 import { assetsDir } from "./render.js";
 import { sanitizeSvg } from "./svg.js";
@@ -495,7 +495,7 @@ export function requestQuestion(prKey: string, question: string): { ok: boolean;
   logEvent(null, "overview_qa", `${prKey}: Q: ${q.slice(0, 120)}`);
   emit({ type: "pr_overview_updated", prKey });
 
-  void repoQueue.run(`${pr.owner}/${pr.repo}`, async () => {
+  void overviewQueue.run(`${pr.owner}/${pr.repo}`, async () => {
     try {
       const r = await answerQuestion(prKey, q);
       logEvent(null, "overview_qa", `${prKey}: answered (${r.status})`);
@@ -533,7 +533,7 @@ export function requestOverview(prKey: string): { ok: boolean; reason?: string }
   logEvent(null, "overview", `${prKey}: generating…`);
   emit({ type: "pr_overview_updated", prKey });
 
-  void repoQueue.run(`${pr.owner}/${pr.repo}`, async () => {
+  void overviewQueue.run(`${pr.owner}/${pr.repo}`, async () => {
     try {
       const r = await generateOverview(prKey);
       logEvent(

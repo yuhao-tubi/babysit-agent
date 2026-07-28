@@ -8,7 +8,7 @@ import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
 import type { PrOverview } from "./db.js";
 import type { QuizQuestion } from "./types.js";
 import { isIgnoredRepo } from "./classify.js";
-import { repoQueue } from "./queue.js";
+import { overviewQueue } from "./queue.js";
 import { emit } from "./events.js";
 
 /**
@@ -222,7 +222,7 @@ export function requestQuiz(prKey: string): { ok: boolean; reason?: string } {
   logEvent(null, "quiz", `${prKey}: generating…`);
   emit({ type: "pr_quiz_updated", prKey });
 
-  void repoQueue.run(`${pr.owner}/${pr.repo}`, async () => {
+  void overviewQueue.run(`${pr.owner}/${pr.repo}`, async () => {
     try {
       const r = await generateQuiz(prKey);
       logEvent(null, "quiz", `${prKey}: ${r.status} (questions=${r.quiz.length})`);

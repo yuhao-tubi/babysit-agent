@@ -7,7 +7,7 @@ import { getPrHead, getPrBody } from "./gh.js";
 import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
 import type { RiskStatus } from "./db.js";
 import { isIgnoredRepo } from "./classify.js";
-import { repoQueue } from "./queue.js";
+import { overviewQueue } from "./queue.js";
 import { emit } from "./events.js";
 import type { RiskCandidate, RiskItem, RiskLevel, RiskVerdictRecord } from "./types.js";
 
@@ -515,7 +515,7 @@ export function requestBlindSpots(prKey: string): { ok: boolean; reason?: string
   logEvent(null, "risks", `${prKey}: generating…`);
   emit({ type: "pr_risks_updated", prKey });
 
-  void repoQueue.run(`${pr.owner}/${pr.repo}`, async () => {
+  void overviewQueue.run(`${pr.owner}/${pr.repo}`, async () => {
     try {
       const r = await generateBlindSpots(prKey);
       logEvent(null, "risks", `${prKey}: ${r.status} (blind spots=${r.risks.length})`);
