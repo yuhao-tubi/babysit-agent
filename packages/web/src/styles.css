@@ -117,3 +117,28 @@ body {
   border-top: 1px solid #e8e8e8;
   margin: 0.8em 0;
 }
+
+/* Scrollable code/diff boxes: keep a visible scrollbar so the clipped content
+   reads as scrollable, instead of macOS's overlay scrollbar that stays hidden
+   until you scroll (which makes a maxHeight box look like overflow:hidden). */
+.scroll-box {
+  scrollbar-width: thin;
+  scrollbar-color: #c1c8d1 transparent;
+}
+.scroll-box::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll-box::-webkit-scrollbar-thumb {
+  background: #c1c8d1;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-box::-webkit-scrollbar-thumb:hover {
+  background: #a6afbb;
+  background-clip: content-box;
+}
+.scroll-box::-webkit-scrollbar-track {
+  background: transparent;
+}

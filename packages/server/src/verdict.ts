@@ -1,5 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { sdkEnv } from "./config.js";
+import { loadConfig, sdkEnv } from "./config.js";
+import { isMaxTurnsError } from "./sdk.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { materializeCiLog } from "./ci.js";
 import type { FeedbackItem, ThreadRow, Verdict } from "./types.js";
@@ -296,33 +297,45 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
     let assistantText = "";
     let endSubtype = "";
     const { env, modelArn } = await sdkEnv();
-    for await (const msg of query({
-      prompt: isCi
-        ? buildCiPrompt(s, items, blobBase, ciLogPath as string)
-        : buildPrompt(s, items, blobBase, prBody),
-      options: {
-        cwd: dir,
-        model: modelArn,
-        systemPrompt: isCi ? CI_VERDICT_SYSTEM : VERDICT_SYSTEM,
-        permissionMode: "dontAsk",
-        allowedTools: ["Read", "Grep", "Glob", "Bash"],
-        settingSources: [],
-        env,
-        // A CI failure means reading a large failing-check log AND investigating
-        // source before deciding — that needs materially more turns than a
-        // review-comment triage, which is usually localized to a few files.
-        maxTurns: isCi ? 60 : 40,
-        stderr: () => {},
-      },
-    })) {
-      if (msg.type === "assistant") {
-        for (const block of msg.message.content) {
-          if (block.type === "text") assistantText += block.text;
+    const cfg = loadConfig();
+    try {
+      for await (const msg of query({
+        prompt: isCi
+          ? buildCiPrompt(s, items, blobBase, ciLogPath as string)
+          : buildPrompt(s, items, blobBase, prBody),
+        options: {
+          cwd: dir,
+          model: modelArn,
+          systemPrompt: isCi ? CI_VERDICT_SYSTEM : VERDICT_SYSTEM,
+          permissionMode: "dontAsk",
+          allowedTools: ["Read", "Grep", "Glob", "Bash"],
+          settingSources: [],
+          env,
+          // A CI failure means reading a large failing-check log AND investigating
+          // source before deciding — that needs materially more turns than a
+          // review-comment triage, which is usually localized to a few files.
+          maxTurns: isCi ? cfg.verdictCiMaxTurns : cfg.verdictMaxTurns,
+          stderr: () => {},
+        },
+      })) {
+        if (msg.type === "assistant") {
+          for (const block of msg.message.content) {
+            if (block.type === "text") assistantText += block.text;
+          }
+        } else if (msg.type === "result") {
+          endSubtype = msg.subtype;
+          if (msg.subtype === "success") last = msg.result;
         }
-      } else if (msg.type === "result") {
-        endSubtype = msg.subtype;
-        if (msg.subtype === "success") last = msg.result;
       }
+    } catch (err) {
+      // A turn-budget cutoff does NOT arrive as an `error_max_turns` result — the
+      // SDK rejects the iterator instead (see sdk.ts). Rethrowing would skip the
+      // salvage below and drop the Thread to `error` with nothing to retry from,
+      // so swallow it and fall through: the streamed assistant text usually
+      // already contains the verdict block, and if it doesn't we degrade to a
+      // safe escalate. Any OTHER error is a real fault → recoverable `error`.
+      if (!isMaxTurnsError(err)) throw err;
+      endSubtype = endSubtype || "error_max_turns";
     }
     // Prefer the clean success result; otherwise fall back to whatever the agent
     // streamed (a max-turns run that still emitted the verdict block).

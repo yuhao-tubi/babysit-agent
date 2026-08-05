@@ -41,6 +41,20 @@ export interface Config {
    * fix agent so it bails early. Default 5.
    */
   maxProposalFiles: number;
+  /**
+   * Agent turn budget for a review-comment Verdict (the read-only investigation
+   * that grounds the decision). Raise it for large monorepos where locating the
+   * cited code takes more exploration. Running out is not fatal — the streamed
+   * verdict block is salvaged, else the Thread escalates — but a too-tight budget
+   * wastes a full agent run. Default 60.
+   */
+  verdictMaxTurns: number;
+  /**
+   * Same, for a CI-failure Verdict: reading a large failing-check log AND
+   * investigating source needs materially more headroom than review triage.
+   * Default 80.
+   */
+  verdictCiMaxTurns: number;
   botLogins: string[];
   /**
    * Authors whose feedback is ignored entirely: no Verdict is run — the Thread is
@@ -108,6 +122,10 @@ const DEFAULTS: Config = {
   maxThreadAttempts: 2,
   maxGateFixAttempts: 2,
   maxProposalFiles: 5,
+  // Raised from 40/60: a bot nit on adRise/www routinely spent the whole budget
+  // just locating the cited code, and the run ended with no verdict.
+  verdictMaxTurns: 60,
+  verdictCiMaxTurns: 80,
   botLogins: [
     "Copilot",
     "copilot-pull-request-reviewer",

@@ -1,47 +1,7 @@
 {
-  "githubLogin": "yuhao-tubi",
-  "pollIntervalMs": 300000,
-  "port": 4317,
-  "dryRun": true,
-  "reposRoot": "~/.babysit-agent/repos",
-  "worktreesRoot": "~/.babysit-agent/cache/worktrees",
-  "dbPath": "~/.babysit-agent/state.db",
-  "ciLogsRoot": "~/.babysit-agent/cache/ci-logs",
-  "maxThreadAttempts": 2,
-  "maxGateFixAttempts": 2,
-  "maxProposalFiles": 5,
-  "botLogins": [
-    "Copilot",
-    "copilot-pull-request-reviewer",
-    "copilot-pull-request-reviewer[bot]",
-    "codex-connector",
-    "codex-connector[bot]",
-    "github-actions[bot]"
-  ],
-  "ignoreAuthors": ["tubi-laborador", "github-actions"],
-  "ignoreRepos": [],
+  "githubLogin": "your-github-login",
   "allowRepos": ["owner/repo"],
+  "dryRun": true,
   "autoPushClasses": [],
-  "bedrockModelName": "claude-opus",
-  "gitUserName": "your-github-login",
-  "gitUserEmail": "you@tubi.tv",
-  "ci": {
-    "enabledRepos": [],
-    "checkAllowlist": [
-      { "pattern": "eslint", "class": "lint" },
-      { "pattern": "lint", "class": "lint" },
-      { "pattern": "typecheck", "class": "typecheck" },
-      { "pattern": "type-check", "class": "typecheck" },
-      { "pattern": "tsc", "class": "typecheck" },
-      { "pattern": "build", "class": "build" },
-      { "pattern": "unit", "class": "unit_test" },
-      { "pattern": "test", "class": "unit_test" }
-    ]
-  },
-  "overview": {
-    "enabled": true,
-    "maxTurns": 150,
-    "reviewerModelName": "claude-sonnet"
-  },
-  "comment": "Copy to config.json and edit. Bedrock auth uses KeySmith — set KEYSMITH_* in .env (see .env.example). bedrockModelName is the KeySmith friendly model name for the author/push path (verdict/gate/executor + author overview & blind spots), resolved to an inference-profile ARN at runtime. overview.reviewerModelName is the (faster) model for read-only reviewer-facing artifacts: reviewer overview + risk analysis, the quiz, and Q&A — both must be models the KeySmith token can invoke. dryRun=true performs NO GitHub writes or pushes. Flip to false only when ready for live action. autoPushClasses lists author classes (\"ci\"/\"bot\"/\"human\") allowed to push without owner approval when the gate passes; default [] means every change parks at awaiting_approval for you to Approve (risk:high always parks regardless)."
+  "comment": "Copy to config.json and set only the overrides you want — every key has a built-in default (full reference in the README config table). `make setup` fills githubLogin + allowRepos for you. Bedrock auth uses KeySmith — set KEYSMITH_* in .env (see .env.example). dryRun=true performs NO GitHub writes or pushes; flip to false only when ready for live action. allowRepos non-empty scopes the pipeline to just those repos (blank = all authored PRs). autoPushClasses lists author classes (\"ci\"/\"bot\"/\"human\") allowed to push without owner approval when the gate passes; default [] parks every change at awaiting_approval for you to Approve (risk:high always parks regardless). Auto-fix commits are authored as githubLogin (no git user.name/user.email needed)."
 }

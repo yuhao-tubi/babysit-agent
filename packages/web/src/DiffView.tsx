@@ -141,6 +141,7 @@ export function DiffView({
 
   return (
     <div
+      className="scroll-box"
       style={{
         maxHeight,
         overflow: "auto",

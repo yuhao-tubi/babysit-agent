@@ -23,6 +23,7 @@ import { getThreadItems, logEvent, updateThread } from "./db.js";
 import { notifyEscalation } from "./notify.js";
 import { emit } from "./events.js";
 import { materializeCiLog } from "./ci.js";
+import { isMaxTurnsError } from "./sdk.js";
 import type { FeedbackItem, Proposal, ThreadRow, Verdict } from "./types.js";
 
 /** Whether this thread's class may push without owner approval (and not high-risk). */
@@ -572,11 +573,6 @@ export async function dismissReplyProposal(s: ThreadRow): Promise<ThreadRow["sta
   const proposal: Proposal = JSON.parse(s.proposalJson);
   logEvent(s.id, "reply_dismissed", "owner dismissed the drafted reply");
   return settleProposal(s, { ...proposal, replyDismissed: true });
-}
-
-/** True if an SDK error is the "Reached maximum number of turns" turn-budget cap. */
-function isMaxTurnsError(err: any): boolean {
-  return /maximum number of turns/i.test(err?.message ?? String(err));
 }
 
 /**

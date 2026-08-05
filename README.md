@@ -81,22 +81,36 @@ Heavy state (SQLite `state.db`, repo clones, worktrees, CI logs) roots under
 
 ## Configuration
 
-`config.json` keys (the wizard fills `githubLogin` + `allowRepos`; edit the rest
-by hand):
+Every key has a built-in default (see `packages/server/src/config.ts`), so
+`config.json` only needs the **overrides** you want — the wizard fills
+`githubLogin` + `allowRepos`, and `config.example.json` shows the handful most
+people touch. The full reference:
 
-| key | meaning |
-|-----|---------|
-| `githubLogin` | your GitHub login; its own comments are skipped |
-| `allowRepos` | if non-empty, only these repos are processed; blank = all authored PRs |
-| `pollIntervalMs` | poll cadence (default 5 min) |
-| `port` | dashboard/API port (default 4317) |
-| `dryRun` | **true** = no GitHub writes/pushes (verdicts + would-be actions only) |
-| `reposRoot` | where PR clones live |
-| `dbPath` | SQLite state file |
-| `maxThreadAttempts` | auto-fixes per thread before escalating (loop guard) |
-| `botLogins` | extra bot logins beyond `user.type=="Bot"` and `*[bot]` |
-| `ignoreRepos` | repos to skip; `owner/repo` matches exactly, a bare name matches any owner |
-| `bedrockModelName` | KeySmith friendly model name, resolved to a Bedrock inference-profile ARN (e.g. `claude-opus`) |
+| key | default | meaning |
+|-----|---------|---------|
+| `githubLogin` | — | your GitHub login; its own comments are skipped, and auto-fix commits are authored as this |
+| `allowRepos` | `["adRise/www"]` | if non-empty, only these repos are processed; blank = all authored PRs |
+| `dryRun` | `true` | **true** = no GitHub writes/pushes (verdicts + would-be actions only) |
+| `autoPushClasses` | `[]` | author classes (`ci`/`bot`/`human`) allowed to push without approval when the gate passes; `[]` parks every change at `awaiting_approval` (`risk:"high"` always parks) |
+| `pollIntervalMs` | `300000` | poll cadence (5 min) |
+| `port` | `4317` | dashboard/API port |
+| `ignoreRepos` | `[]` | repos to skip; `owner/repo` matches exactly, a bare name matches any owner |
+| `ignoreAuthors` | `["tubi-laborador", "github-actions"]` | authors whose feedback is dropped with no verdict (case-insensitive, tolerates `[bot]` suffix) |
+| `botLogins` | (Copilot, codex, …) | extra bot logins beyond `user.type=="Bot"` and `*[bot]` |
+| `maxThreadAttempts` | `2` | auto-fixes per thread before escalating (loop guard) |
+| `maxGateFixAttempts` | `2` | times the fix agent re-runs to repair gate errors it introduced, per fix |
+| `maxProposalFiles` | `5` | max files a proposed change may touch before it's deemed too large and handed off as a manual plan |
+| `verdictMaxTurns` | `60` | agent turn budget for a review-comment verdict; raise it in large monorepos where locating the cited code takes more exploration |
+| `verdictCiMaxTurns` | `80` | same, for a CI-failure verdict (reading a large failing-check log needs more headroom) |
+| `bedrockModelName` | `claude-opus` | KeySmith model for the author/push path (verdict/gate/executor), resolved to an inference-profile ARN |
+| `overview.enabled` | `true` | master switch for the PR overview + diagram feature |
+| `overview.maxTurns` | `150` | agent turn budget for the read-only PR investigation |
+| `overview.reviewerModelName` | `claude-sonnet` | faster model for read-only reviewer-facing artifacts (overview, risk analysis, quiz, Q&A) |
+| `explain.enabled` | `true` | master switch for per-Thread Explanations (the **Explain** button) |
+| `explain.maxTurns` | `60` | agent turn budget for explaining ONE question; sized like `verdictMaxTurns` (a localized investigation), not `overview.maxTurns` |
+| `ci.enabledRepos` | `[]` | repos where CI babysitting is on (same matching as `ignoreRepos`); `[]` = off everywhere |
+| `ci.checkAllowlist` | (lint/typecheck/build/test) | which CI checks to babysit, and the gate class each maps to |
+| `reposRoot` / `dbPath` / `worktreesRoot` / `ciLogsRoot` | under `BABYSIT_DATA_DIR` | on-disk state paths; auto-derived from the data dir, rarely overridden |
 
 ## Run at login
 
