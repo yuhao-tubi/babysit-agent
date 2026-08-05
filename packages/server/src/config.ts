@@ -80,6 +80,24 @@ export interface Config {
   ci: CiConfig;
   /** PR-level overview + diagram settings (a read-only, on-demand Session artifact). */
   overview: OverviewConfig;
+  /** Thread-level Explanation settings (a read-only, on-demand Thread artifact). */
+  explain: ExplainConfig;
+}
+
+/**
+ * Explanation config. Its OWN block rather than a key under `overview`: an
+ * Explanation is Thread-grained and answers one question, whereas everything
+ * under `overview` is PR-grained — filing it there would mislead the next reader.
+ */
+export interface ExplainConfig {
+  /** Master switch for the Explain feature. */
+  enabled: boolean;
+  /**
+   * Agent turn budget for ONE question. Sized near `verdictMaxTurns` (a localized
+   * investigation of a few files), NOT `overview.maxTurns` (a PR-wide sweep plus
+   * diagram authoring) — the work is much closer to review triage.
+   */
+  maxTurns: number;
 }
 
 /** PR-overview config (decisions 14/15). */
@@ -169,6 +187,12 @@ const DEFAULTS: Config = {
     // and the push path stay on bedrockModelName (opus). See OverviewConfig.
     reviewerModelName: "claude-sonnet",
   },
+  explain: {
+    enabled: true,
+    // One question, usually localized to a few files — start at the review-triage
+    // budget (verdictMaxTurns) rather than the PR-wide overview budget.
+    maxTurns: 60,
+  },
 };
 
 let cached: Config | null = null;
@@ -198,6 +222,7 @@ export function loadConfig(): Config {
   // Shallow spread would let a partial `ci` block drop the defaults — merge it.
   merged.ci = { ...DEFAULTS.ci, ...(fileCfg.ci ?? {}) };
   merged.overview = { ...DEFAULTS.overview, ...(fileCfg.overview ?? {}) };
+  merged.explain = { ...DEFAULTS.explain, ...(fileCfg.explain ?? {}) };
 
   // Containerized runs bind-mount a single data dir (see Dockerfile). When
   // BABYSIT_DATA_DIR is set, root the heavy runtime state (db + clones +

@@ -19,6 +19,7 @@ import {
 import { requestOverview, requestQuestion } from "./overview.js";
 import { requestQuiz } from "./quiz.js";
 import { requestBlindSpots, blindSpotsStale } from "./risks.js";
+import { requestExplanation } from "./explain.js";
 import { isIgnoredRepo } from "./classify.js";
 import {
   applyInstruction,
@@ -44,9 +45,22 @@ function threadView(id: number) {
     verdict: s.verdictJson ? JSON.parse(s.verdictJson) : null,
     proposal: s.proposalJson ? JSON.parse(s.proposalJson) : null,
     newCommits: s.newCommitsJson ? JSON.parse(s.newCommitsJson) : null,
+    // SOFT staleness for the Explanation (unlike risks, which are withheld when
+    // stale): the prose stays useful after a push — only its permalinks rot — so
+    // the doc is always served and the UI just notes it was built on an older
+    // head. Provable only when BOTH shas are known.
+    explanationStale:
+      !!s.explanationMd &&
+      !!s.explanationHeadSha &&
+      s.explanationHeadSha !== prHeadSha(s.prKey),
     items: getThreadItems(id),
     events: getEvents(id),
   };
+}
+
+/** Live head sha for a PR (null when unknown), for artifact staleness checks. */
+function prHeadSha(prKey: string): string | null {
+  return getPrOverview(prKey)?.headSha ?? null;
 }
 
 /** Rollup status for a PR from its threads' statuses (needs-you floats up). */
@@ -203,6 +217,21 @@ export async function startServer(port: number): Promise<void> {
     if (!r.ok) return reply.code(409).send({ error: r.reason });
     return { ok: true };
   });
+
+  // Trigger Explanation (re)generation for a THREAD. Fire-and-forget; progress
+  // arrives via the `thread_updated` SSE event. Available on any Thread in any
+  // status (a question is worth answering whether the Thread is blocked, awaiting
+  // approval, or already resolved) — no role gate, no overview prerequisite. An
+  // optional `question` re-asks: it replaces the previous answer (one-shot
+  // artifact, no transcript). Read-only: `dryRun` does not gate it.
+  app.post<{ Params: { id: string }; Body: { question?: string } }>(
+    "/api/threads/:id/explain",
+    async (req, reply) => {
+      const r = requestExplanation(Number(req.params.id), req.body?.question);
+      if (!r.ok) return reply.code(409).send({ error: r.reason });
+      return { ok: true };
+    }
+  );
 
   // Trigger author Blind-spot (re)generation for a PR. Fire-and-forget; progress
   // arrives via the `pr_risks_updated` SSE event. Author-role only; requires an

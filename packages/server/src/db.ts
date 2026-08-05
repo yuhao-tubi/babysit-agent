@@ -6,6 +6,7 @@ import type {
   AuthorClass,
   BranchAdvance,
   DiagramSet,
+  ExplanationStatus,
   FeedbackItem,
   Proposal,
   QuizQuestion,
@@ -122,6 +123,22 @@ function migrate(d: Database.Database): void {
   if (!cols.some((c) => c.name === "new_commits_json")) {
     d.exec("ALTER TABLE threads ADD COLUMN new_commits_json TEXT");
   }
+  // Thread-level EXPLANATION artifact (see CONTEXT.md): the agent's read-only
+  // markdown answer to this Thread's question, owner-facing only (never posted).
+  // Thread-grained rather than PR-grained (unlike overview/risks/quiz) because a
+  // question belongs to a Thread — `threads` already enforces (pr_key, thread_key)
+  // uniqueness and already carries per-Thread agent artifacts (verdict_json,
+  // proposal_json, diff). `explanation_head_sha` drives a SOFT staleness hint:
+  // the prose survives a push, only the permalinks rot.
+  const addThreadCol = (name: string, decl: string) => {
+    if (!cols.some((c) => c.name === name)) {
+      d.exec(`ALTER TABLE threads ADD COLUMN ${name} ${decl}`);
+    }
+  };
+  addThreadCol("explanation_md", "TEXT");
+  addThreadCol("explanation_status", "TEXT");
+  addThreadCol("explanation_head_sha", "TEXT");
+  addThreadCol("explanation_question", "TEXT");
 
   // Additive columns on `prs` for the PR-level overview + diagram artifact
   // (a Session-level artifact that lives OUTSIDE the Thread/Verdict lifecycle).
@@ -341,6 +358,10 @@ export function updateThread(
     error: string | null;
     attemptCount: number;
     newCommits: BranchAdvance | null;
+    explanationMd: string | null;
+    explanationStatus: ExplanationStatus | null;
+    explanationHeadSha: string | null;
+    explanationQuestion: string | null;
   }>
 ): void {
   const sets: string[] = [];
@@ -390,6 +411,25 @@ export function updateThread(
     params.new_commits_json =
       fields.newCommits === null ? null : JSON.stringify(fields.newCommits);
   }
+  // Explanation artifact. Deliberately NOT cleared when `status` changes: unlike a
+  // Proposal (frozen for one Approve) or the branch-advance marker, an explanation
+  // is standalone reference the owner may still want on a resolved Thread.
+  if (fields.explanationMd !== undefined) {
+    sets.push("explanation_md=@explanation_md");
+    params.explanation_md = fields.explanationMd;
+  }
+  if (fields.explanationStatus !== undefined) {
+    sets.push("explanation_status=@explanation_status");
+    params.explanation_status = fields.explanationStatus;
+  }
+  if (fields.explanationHeadSha !== undefined) {
+    sets.push("explanation_head_sha=@explanation_head_sha");
+    params.explanation_head_sha = fields.explanationHeadSha;
+  }
+  if (fields.explanationQuestion !== undefined) {
+    sets.push("explanation_question=@explanation_question");
+    params.explanation_question = fields.explanationQuestion;
+  }
   sets.push("updated_at=@updated_at");
   getDb()
     .prepare(`UPDATE threads SET ${sets.join(", ")} WHERE id=@id`)
@@ -412,6 +452,10 @@ function rowToThread(r: any): ThreadRow {
     diff: r.diff,
     proposalJson: r.proposal_json ?? null,
     newCommitsJson: r.new_commits_json ?? null,
+    explanationMd: r.explanation_md ?? null,
+    explanationStatus: (r.explanation_status as ExplanationStatus) ?? null,
+    explanationHeadSha: r.explanation_head_sha ?? null,
+    explanationQuestion: r.explanation_question ?? null,
     attemptCount: r.attempt_count,
     error: r.error,
     createdAt: r.created_at,
@@ -808,6 +852,24 @@ export function failStuckRisks(): string[] {
   if (!stuck.length) return [];
   db.prepare("UPDATE prs SET risks_status='failed' WHERE risks_status='generating'").run();
   return stuck.map((r) => r.pr_key);
+}
+
+/**
+ * Startup sweep for Thread Explanations — same reasoning as `failStuckRisks`: an
+ * explanation left `generating` by a crash owes GitHub nothing (no write path at
+ * all), so it is reset to `failed` (re-clickable) rather than resumed. Returns the
+ * thread ids reset.
+ */
+export function failStuckExplanations(): number[] {
+  const db = getDb();
+  const stuck = db
+    .prepare("SELECT id FROM threads WHERE explanation_status='generating'")
+    .all() as { id: number }[];
+  if (!stuck.length) return [];
+  db.prepare(
+    "UPDATE threads SET explanation_status='failed' WHERE explanation_status='generating'"
+  ).run();
+  return stuck.map((r) => r.id);
 }
 
 /** Most recent poll time across all PRs (the daemon's last poll cycle). */

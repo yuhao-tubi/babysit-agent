@@ -185,6 +185,16 @@ export interface ThreadDetail {
   verdict: Verdict | null;
   proposal: Proposal | null;
   newCommits: BranchAdvance | null;
+  /**
+   * Explanation artifact: the agent's read-only markdown answer to this Thread's
+   * question (mermaid in fenced blocks). Owner-facing only — never posted.
+   */
+  explanationMd: string | null;
+  explanationStatus: "generating" | "ready" | "failed" | null;
+  /** The follow-up question the last run answered (null = the thread's own topic). */
+  explanationQuestion: string | null;
+  /** Soft hint: built against an older head, so its permalinks may be stale. */
+  explanationStale: boolean;
   items: FeedbackItem[];
   events: { kind: string; message: string; at: string }[];
 }

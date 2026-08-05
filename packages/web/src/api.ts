@@ -85,6 +85,22 @@ export async function refineInstruction(
   return (await r.json()).refined as string;
 }
 
+/**
+ * Ask the agent to explain this Thread's question. Optional `question` re-asks
+ * ("explain X instead") and replaces the previous answer. Fire-and-forget — the
+ * doc arrives over the SSE `thread_updated` stream.
+ */
+export async function explainThread(id: number, question?: string): Promise<void> {
+  const r = await fetch(`/api/threads/${id}/explain`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  if (!r.ok && r.status !== 409) {
+    throw new Error((await r.json().catch(() => ({})))?.error ?? "explain failed");
+  }
+}
+
 export async function triggerPoll(): Promise<void> {
   await fetch("/api/poll", { method: "POST" });
 }

@@ -24,6 +24,7 @@ import {
   CommentOutlined,
   GithubOutlined,
   CopyOutlined,
+  BulbOutlined,
 } from "@ant-design/icons";
 import type { ThreadDetail } from "./types";
 import {
@@ -37,6 +38,7 @@ import {
   replyToThread,
   resolveThread,
   refineInstruction,
+  explainThread,
 } from "./api";
 import { StatusTag } from "./status";
 import { Markdown } from "./Markdown";
@@ -94,6 +96,8 @@ export function ThreadDetailView({
   const [refineNote, setRefineNote] = useState("");
   const [refinePreview, setRefinePreview] = useState("");
   const [refining, setRefining] = useState(false);
+  const [explainQuestion, setExplainQuestion] = useState("");
+  const [explaining, setExplaining] = useState(false);
 
   const load = useCallback(() => {
     fetchThread(id).then(setDetail).catch(() => setDetail(null));
@@ -147,6 +151,20 @@ export function ThreadDetailView({
     setRetrying(false);
     onChanged();
     load();
+  };
+
+  /** Ask the agent to explain this thread (optionally a specific follow-up). */
+  const explain = async (question?: string) => {
+    setExplaining(true);
+    try {
+      await explainThread(id, question);
+      setExplainQuestion("");
+      load();
+    } catch (err: any) {
+      message.error(err?.message ?? "explain failed");
+    } finally {
+      setExplaining(false);
+    }
   };
 
   const rerun = async () => {
@@ -254,6 +272,17 @@ export function ThreadDetailView({
           </Space>
         </div>
         <Space>
+          {/* Available in EVERY status: a question is worth answering whether the
+              thread is blocked, awaiting approval, or already resolved. Read-only
+              — it posts nothing to GitHub. */}
+          <Button
+            icon={<BulbOutlined />}
+            loading={explaining || detail.explanationStatus === "generating"}
+            onClick={() => explain()}
+            title="Explain this thread's question — a grounded, read-only walkthrough with diagrams. Never posted to GitHub."
+          >
+            {detail.explanationMd ? "Re-explain" : "Explain"}
+          </Button>
           {detail.status !== "resolved" && (
             <Button
               icon={<CheckCircleOutlined />}
@@ -493,6 +522,83 @@ export function ThreadDetailView({
             <Markdown>{detail.proposal.replyDraft}</Markdown>
           </Card>
         )}
+
+      {/* Explanation: a read-only, owner-facing walkthrough. There is deliberately
+          no "use as reply" — the doc is written to explain TO YOU, which is a
+          different register from a reply to a reviewer. Copy from it (the Markdown
+          card has a copy-raw button) and use the instruction box to draft a reply. */}
+      {(detail.explanationMd || detail.explanationStatus) && (
+        <Card
+          size="small"
+          title={
+            <Space size={6}>
+              <BulbOutlined />
+              <span>Explanation</span>
+              {detail.explanationStale && (
+                <Tag color="warning" style={{ marginInlineEnd: 0 }}>
+                  older head
+                </Tag>
+              )}
+            </Space>
+          }
+          extra={
+            detail.explanationQuestion ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                asked: {detail.explanationQuestion}
+              </Text>
+            ) : null
+          }
+        >
+          {detail.explanationStatus === "generating" ? (
+            <Space>
+              <Spin size="small" />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Investigating the checkout…
+              </Text>
+            </Space>
+          ) : detail.explanationStatus === "failed" && !detail.explanationMd ? (
+            <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+              Couldn’t produce a grounded explanation (the agent must cite real
+              lines in the checkout). Try again, or ask a narrower question below.
+            </Paragraph>
+          ) : detail.explanationMd ? (
+            <>
+              {detail.explanationStale && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 8 }}
+                  message="Built against an earlier head — the prose likely still holds, but its code links may point at moved lines."
+                />
+              )}
+              <Markdown>{detail.explanationMd}</Markdown>
+            </>
+          ) : null}
+
+          <Space.Compact style={{ width: "100%", marginTop: 10 }}>
+            <Input
+              placeholder="Ask something else about this thread (e.g. “explain the retry ledger instead”)"
+              value={explainQuestion}
+              onChange={(e) => setExplainQuestion(e.target.value)}
+              onPressEnter={() =>
+                explainQuestion.trim() && explain(explainQuestion.trim())
+              }
+              disabled={explaining || detail.explanationStatus === "generating"}
+            />
+            <Button
+              type="primary"
+              loading={explaining || detail.explanationStatus === "generating"}
+              disabled={!explainQuestion.trim()}
+              onClick={() => explain(explainQuestion.trim())}
+            >
+              Ask
+            </Button>
+          </Space.Compact>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            Replaces the answer above. Read-only — nothing is posted to GitHub.
+          </Text>
+        </Card>
+      )}
 
       <Card size="small" title={`Feedback (${detail.items.length})`}>
         <Space direction="vertical" size={12} style={{ width: "100%" }}>

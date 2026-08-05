@@ -91,8 +91,11 @@ documented keys.
     Proposal and applied only on the owner's Approve.
   - Restart recovery re-renders/re-applies durable artifacts (frozen Proposals);
     it **never** replays a stored Verdict decision (that re-escalated a resolved
-    Thread). Self-authored activity (`@me`, incl. the agent's acks) never
-    re-opens a Thread.
+    Thread). The **agent's own** acks never re-open a Thread — identified by the
+    marker stamped on every reply it posts (`AGENT_MARKER`), *not* by the login,
+    since the agent posts as `@me`. A comment the **owner** typed is real input: a
+    note-to-self is work for the agent, so a Thread you rooted is triaged like any
+    other, and only an entirely agent-authored group is never made a Thread.
 - **`gh` CLI is the only GitHub surface.** Keep all of it in `gh.ts`; don't
   introduce an Octokit/token path.
 - **Verdicts must be grounded.** The agent investigates the real checkout before

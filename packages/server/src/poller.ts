@@ -9,9 +9,11 @@ import {
 import {
   classifyAuthor,
   isCiEnabledRepo,
+  isAgentAuthored,
   isIgnoredAuthor,
   isIgnoredRepo,
   isOwnAuthor,
+  predatesAgentMarker,
 } from "./classify.js";
 import type { FeedbackItem } from "./types.js";
 import { cleanupCiLog } from "./ci.js";
@@ -115,9 +117,13 @@ export async function pollOnce(): Promise<PollResult> {
 
       for (const group of fb.threads.values()) {
         const isCi = group.items[0]?.kind === "ci_failure";
-        // Skip your own threads (never for CI — its synthetic author isn't you)
-        // and any GitHub-resolved thread (never act on resolved).
-        if (!isCi && isOwnAuthor(group.rootAuthor)) continue;
+        // A thread you rooted yourself is triaged like any other: a note-to-self
+        // on your own PR ("why is this safe?") is real work for the agent, and a
+        // reviewer replying under it is real feedback. The root author no longer
+        // gates thread creation — self-authored ITEMS are still discounted as
+        // "new activity" in `upsertThread`, which is what keeps the agent's own
+        // acks from re-opening a thread. Skip any GitHub-resolved thread (never
+        // act on resolved).
         if (fb.resolvedThreadKeys.has(group.threadKey)) continue;
 
         // Ignored authors (e.g. tubi-laborador, github-actions): never triage —
@@ -262,18 +268,33 @@ function upsertThread(
       ? "ci"
       : classifyAuthor(group.rootAuthor, group.rootAuthorType);
 
-  // Any item we haven't recorded yet signals new activity — but NOT items we
-  // authored ourselves. The agent acts as the PR owner (`@me`), so its ack
-  // replies (and the owner's own comments) carry our login; counting them as
-  // "new activity" is what re-opened a just-resolved thread and re-escalated it.
-  // Only a reviewer/bot saying something new should re-open. CI groups carry a
-  // synthetic author that is never us, so they're unaffected (decision Q16).
-  const isSelf = (it: FeedbackItem) => authorClass !== "ci" && isOwnAuthor(it.author);
-  const hasNewActivity = group.items.some((it) => !hasSeenFeedback(it.ghId) && !isSelf(it));
+  // Any item we haven't recorded yet signals new activity — but NOT the agent's
+  // OWN replies. The agent acts as the PR owner (`@me`), so its ack replies carry
+  // our login; counting them as "new activity" is what re-opened a just-resolved
+  // thread and re-escalated it. They're identified by the marker the agent stamps
+  // on every reply, NOT by the login — an owner-typed note shares that login but
+  // IS real input (a note-to-self is work for the agent, so it should re-open a
+  // resolved thread). CI groups carry a synthetic author that is never us, so
+  // they're unaffected (decision Q16).
+  // Legacy acks (posted before the marker shipped) carry none, so they fall back
+  // to a timestamp check — see `predatesAgentMarker`.
+  const isAgentOwn = (it: FeedbackItem) =>
+    authorClass !== "ci" &&
+    isOwnAuthor(it.author) &&
+    (isAgentAuthored(it.body) || predatesAgentMarker(it.createdAt));
+  const hasNewActivity = group.items.some((it) => !hasSeenFeedback(it.ghId) && !isAgentOwn(it));
   for (const it of group.items) recordFeedback(prKey, it, reviewId);
 
   const existing = getThreadByKey(prKey, group.threadKey);
   if (!existing) {
+    // A group consisting ENTIRELY of the agent's own comments is its own output,
+    // never a new unit of work. This is the guard that keeps a top-level ack from
+    // ratcheting: `postIssueComment` mints a NEW comment id, so the agent's reply
+    // to a review-summary/issue thread arrives next poll as a fresh group with a
+    // fresh thread_key — the new-activity check below never sees it (it only runs
+    // for an existing thread) and the attempt guard is keyed per thread_key, so
+    // without this the agent would keep replying to itself.
+    if (!hasNewActivity) return null;
     const id = createThread({
       prKey,
       owner: pr.owner,

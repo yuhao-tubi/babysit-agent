@@ -15,6 +15,7 @@ import { getPrOverview } from "./db.js";
 import { runGate } from "./gate.js";
 import { clonePath } from "./worktrees.js";
 import { generateBlindSpots } from "./risks.js";
+import { generateExplanation } from "./explain.js";
 import { processThread } from "./processor.js";
 import { getEvents } from "./db.js";
 
@@ -130,6 +131,22 @@ async function main() {
       printRisks(r.status, r.risks);
       break;
     }
+    case "explain": {
+      // Thread Explanation (CONTEXT.md). Runs the same on-demand engine the
+      // dashboard's POST /api/threads/:id/explain uses — own read-only skipDeps
+      // worktree, grounding floor, and PERSISTS the doc + head sha. Read-only
+      // w.r.t. GitHub. An optional trailing question re-asks.
+      //   cli.ts explain <threadId> ["explain X instead"]
+      const threadId = Number(process.argv[3]);
+      if (!threadId) throw new Error('usage: cli.ts explain <threadId> ["question"]');
+      const question = process.argv[4] || null;
+      const r = await generateExplanation(threadId, question);
+      console.log(`explanation status: ${r.status}  head: ${r.headSha}`);
+      const t = getThread(threadId);
+      if (t?.explanationMd) console.log(`\n${t.explanationMd}`);
+      else console.log("(no grounded explanation produced — see the status above)");
+      break;
+    }
     case "gate": {
       const owner = "adRise";
       const repo = process.argv[3];
@@ -139,7 +156,7 @@ async function main() {
       break;
     }
     default:
-      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|process <id>|retry-errors|gate <repo>>");
+      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|blindspots <prKey>|explain <threadId> [question]|process <id>|retry-errors|gate <repo>>");
       process.exit(1);
   }
 }

@@ -5,6 +5,26 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github.css";
+import { Mermaid } from "./Mermaid";
+
+/**
+ * Route ```mermaid fences to the <Mermaid> renderer instead of a highlighted code
+ * block, so any markdown surface can carry a diagram (Explanations author them;
+ * GitHub renders the same fences natively, so pasted comments work too). A broken
+ * chart is safe: <Mermaid> falls back to showing the raw source.
+ */
+const components = {
+  code({ className, children, ...props }: any) {
+    if (/\blanguage-mermaid\b/.test(className ?? "")) {
+      return <Mermaid chart={String(children).replace(/\n$/, "")} />;
+    }
+    return (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    );
+  },
+};
 
 /**
  * Renders GitHub-flavored markdown as a preview, with a button to copy the raw
@@ -55,6 +75,7 @@ export function Markdown({
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+          components={components}
         >
           {children}
         </ReactMarkdown>

@@ -24,6 +24,7 @@ import { notifyEscalation } from "./notify.js";
 import { emit } from "./events.js";
 import { materializeCiLog } from "./ci.js";
 import { isMaxTurnsError } from "./sdk.js";
+import { markAgentAuthored } from "./classify.js";
 import type { FeedbackItem, Proposal, ThreadRow, Verdict } from "./types.js";
 
 /** Whether this thread's class may push without owner approval (and not high-risk). */
@@ -80,11 +81,16 @@ export async function postReply(
   body: string
 ): Promise<void> {
   const target = replyTarget(items);
+  // Every reply carries the agent marker (see AGENT_MARKER): replies post under
+  // the owner's `gh` login, so the login alone can't distinguish the agent's own
+  // ack from a genuine note the owner typed. The poller needs that distinction
+  // now that a self-rooted thread is triaged like any other.
+  const marked = markAgentAuthored(body);
   if (target && target.kind === "review_comment") {
-    await replyToReviewComment(s.owner, s.repo, s.number, target.ghId, body);
+    await replyToReviewComment(s.owner, s.repo, s.number, target.ghId, marked);
   } else {
     // Review summaries / issue comments → top-level issue comment.
-    await postIssueComment(s.owner, s.repo, s.number, body);
+    await postIssueComment(s.owner, s.repo, s.number, marked);
   }
 }
 

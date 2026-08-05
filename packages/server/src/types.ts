@@ -43,6 +43,14 @@ export interface DiagramDoc {
  */
 export type DiagramSet = Partial<Record<DiagramSection, DiagramDoc>>;
 
+/**
+ * Status of a Thread's Explanation artifact (see CONTEXT.md, Explanation): a
+ * read-only, on-demand markdown doc answering the question in a Thread. Mirrors
+ * the other on-demand artifacts (risks/quiz) — `null` means never generated.
+ * There is no `idle`: the row is NULL until the first run.
+ */
+export type ExplanationStatus = "generating" | "ready" | "failed";
+
 /** Severity vocabulary for a Risk — reuses the Verdict `risk` levels. */
 export type RiskLevel = "low" | "medium" | "high";
 
@@ -298,6 +306,26 @@ export interface ThreadRow {
   proposalJson: string | null;
   /** Commits pushed to the branch while this Thread was waiting (JSON BranchAdvance); null otherwise. */
   newCommitsJson: string | null;
+  /**
+   * Explanation artifact (see CONTEXT.md): the agent's read-only markdown answer
+   * to this Thread's question, with mermaid in fenced blocks. Purely owner-facing
+   * — it is NEVER posted to GitHub (no write path), so it needs no Approve.
+   */
+  explanationMd: string | null;
+  explanationStatus: ExplanationStatus | null;
+  /**
+   * Head the explanation was built against. Drives a SOFT staleness hint: unlike
+   * a Blind spot (which is blanked when stale), an explanation's prose stays
+   * useful after a push — only its permalinks rot — so the panel keeps showing it
+   * and just notes it was built against an older head.
+   */
+  explanationHeadSha: string | null;
+  /**
+   * The owner's follow-up question for the LAST run ("explain X instead"). NULL
+   * means the default framing: explain the question raised in this Thread's
+   * feedback. Persisted so the panel can show what was asked.
+   */
+  explanationQuestion: string | null;
   attemptCount: number;
   error: string | null;
   createdAt: string;
