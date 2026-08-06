@@ -63,6 +63,17 @@ function prHeadSha(prKey: string): string | null {
   return getPrOverview(prKey)?.headSha ?? null;
 }
 
+/**
+ * Sort rank for a Thread status — needs-you first: blocked/error → awaiting
+ * approval → ongoing (pending/in_progress) → resolved.
+ */
+function statusRank(s: ThreadStatus): number {
+  if (s === "blocked" || s === "error") return 0;
+  if (s === "awaiting_approval") return 1;
+  if (s === "pending" || s === "in_progress") return 2;
+  return 3;
+}
+
 /** Rollup status for a PR from its threads' statuses (needs-you floats up). */
 function rollupStatus(statuses: ThreadStatus[]): ThreadStatus {
   if (statuses.some((s) => s === "blocked" || s === "error")) return "blocked";
@@ -88,7 +99,12 @@ export async function startServer(port: number): Promise<void> {
   // a pre-fetched thread list so a caller can fetch `listThreads()` once and reuse
   // it across a page of PRs rather than re-querying per row.
   const toGroup = (p: PrRow, threads: ReturnType<typeof listThreads>) => {
-    const ts = threads.filter((t) => t.prKey === p.prKey);
+    // Stable, deterministic Thread order: needs-you first (blocked > awaiting
+    // approval > ongoing > resolved), then by Thread id so rows never reshuffle
+    // between SSE-driven refreshes (`updatedAt` alone made them jump around).
+    const ts = threads
+      .filter((t) => t.prKey === p.prKey)
+      .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.id - b.id);
     const status = rollupStatus(ts.map((t) => t.status));
     const counts = {
       blocked: ts.filter((t) => t.status === "blocked" || t.status === "error").length,
@@ -129,9 +145,10 @@ export async function startServer(port: number): Promise<void> {
     const out = [...authored, ...reviewer].map((p) => toGroup(p, threads));
     // blocked PRs first, then awaiting approval, then ongoing, then resolved.
     // Reviewer PRs (no threads → "resolved" rollup) naturally sort last.
-    const rank = (s: ThreadStatus) =>
-      s === "blocked" ? 0 : s === "awaiting_approval" ? 1 : s === "pending" ? 2 : 3;
-    out.sort((a, b) => rank(a.status) - rank(b.status));
+    // Tie-break on prKey so equal-status rows keep a fixed order across polls.
+    out.sort(
+      (a, b) => statusRank(a.status) - statusRank(b.status) || a.prKey.localeCompare(b.prKey)
+    );
     return out;
   });
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { cloneElement, isValidElement, useCallback, useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -296,14 +296,26 @@ export function ThreadDetailView({
           <Dropdown.Button
             loading={retrying || rerunning}
             onClick={retry}
-            disabled={!detail.verdict}
             trigger={["hover"]}
+            // `disabled` on Dropdown.Button disables BOTH halves. Only Retry needs
+            // a verdict to resume from — Fresh Rerun re-runs the pipeline from
+            // scratch and is the ONLY way out of an `error` thread that failed
+            // before any verdict was stored, so it must stay live. Gate the left
+            // half alone.
             buttonsRender={([left, right]) => [
               <span
                 key="left"
-                title="Resume from the last state, reusing the existing verdict (e.g. after a transient commit/push failure)"
+                title={
+                  detail.verdict
+                    ? "Resume from the last state, reusing the existing verdict (e.g. after a transient commit/push failure)"
+                    : "No stored verdict to resume from — use Fresh Rerun"
+                }
               >
-                {left}
+                {isValidElement(left)
+                  ? cloneElement(left as React.ReactElement<{ disabled?: boolean }>, {
+                      disabled: !detail.verdict,
+                    })
+                  : left}
               </span>,
               right,
             ]}
@@ -886,6 +898,7 @@ function Pre({
 }) {
   return (
     <pre
+      className="scroll-box"
       style={{
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
