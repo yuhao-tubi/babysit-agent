@@ -128,23 +128,17 @@ function DiffRow({ line }: { line: string }) {
   );
 }
 
-export function DiffView({
-  diff,
-  maxHeight,
-}: {
-  diff: string;
-  maxHeight?: number;
-}) {
+export function DiffView({ diff }: { diff: string }) {
   if (!diff.trim()) return null;
   const files = parseFiles(diff);
   if (files.length === 0) return null;
 
+  // Rendered at full height on purpose: every file, every line, no inner
+  // scroller. The page scrolls instead, so the reviewer always sees the exact
+  // change being approved (a maxHeight box here silently clipped hunks).
   return (
     <div
-      className="scroll-box"
       style={{
-        maxHeight,
-        overflow: "auto",
         fontSize: 12,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         display: "flex",

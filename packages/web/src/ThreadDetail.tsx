@@ -455,12 +455,12 @@ export function ThreadDetailView({
             )
           )}
           {detail.proposal.kind === "code" && detail.proposal.diff && (
-            <DiffView maxHeight={360} diff={detail.proposal.diff} />
+            <DiffView diff={detail.proposal.diff} />
           )}
           {detail.proposal.kind === "pr_body" && (
             <>
               {detail.proposal.bodyDiff && (
-                <DiffView maxHeight={360} diff={detail.proposal.bodyDiff} />
+                <DiffView diff={detail.proposal.bodyDiff} />
               )}
               <Title level={5} style={{ marginTop: 12 }}>
                 New description (preview)
@@ -687,7 +687,7 @@ export function ThreadDetailView({
 
       {detail.diff && (
         <Card size="small" title="Applied diff">
-          <DiffView maxHeight={360} diff={detail.diff} />
+          <DiffView diff={detail.diff} />
         </Card>
       )}
 
