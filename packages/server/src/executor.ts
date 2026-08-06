@@ -8,8 +8,7 @@ import {
   headSha,
   remoteHeadSha,
   pushFastForward,
-  applyPatch,
-  applyPatchCheck,
+  applyPatchRebasing,
 } from "./worktrees.js";
 import { runGate } from "./gate.js";
 import {
@@ -474,24 +473,43 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     lightDeps: s.authorClass !== "ci",
   });
   try {
-    // Does the reviewed diff still land on today's tree?
-    if (!(await applyPatchCheck(dir, proposal.diff))) {
+    // Does the reviewed diff still land on today's tree? Plain apply first
+    // (exact frozen bytes); on context drift, a 3-way merge re-seats the same
+    // edit. `landed.diff` is what will actually be pushed — from here on, use it
+    // instead of `proposal.diff` for the gate, the stored diff, and the log.
+    const landed = await applyPatchRebasing(dir, proposal.diff);
+    if (landed.mode === "conflict" || landed.mode === "invalid") {
       const moved = remoteSha !== proposal.baseSha;
-      if (moved) {
-        logEvent(s.id, "approve_stale", `branch advanced ${proposal.baseSha.slice(0, 7)}->${remoteSha.slice(0, 7)}; reviewed lines changed upstream`);
+      if (landed.mode === "conflict") {
+        logEvent(s.id, "approve_stale", `branch advanced ${proposal.baseSha.slice(0, 7)}->${remoteSha.slice(0, 7)}; upstream edited the same lines this proposal changes`);
         notifyEscalation(s.id, s.prKey, "the lines you reviewed were modified upstream; send an instruction to re-propose");
       } else {
-        // HEAD is unchanged, so the patch itself won't apply — a malformed frozen
-        // diff, not upstream drift. Surface it as its own failure so it isn't
-        // misdiagnosed as a moved branch.
-        logEvent(s.id, "approve_patch_invalid", `frozen diff no longer applies at unchanged HEAD ${remoteSha.slice(0, 7)}; re-propose to rebuild it`);
+        // Nothing landed even with a 3-way merge: a malformed frozen diff, or the
+        // pre-image blob is missing so no merge was possible. Distinct from a
+        // conflict so it isn't misdiagnosed as upstream drift.
+        logEvent(s.id, "approve_patch_invalid", `frozen diff could not be applied at ${remoteSha.slice(0, 7)}${moved ? ` (branch advanced from ${proposal.baseSha.slice(0, 7)})` : " (unchanged HEAD)"}; re-propose to rebuild it`);
         notifyEscalation(s.id, s.prKey, "the saved proposal could not be applied; send an instruction to re-propose");
       }
       return "blocked";
     }
-    await applyPatch(dir, proposal.diff);
 
-    // Re-gate the EXACT frozen bytes on current HEAD — confirm they still build.
+    // A rebased landing is no longer WYSIWYG — the pushed bytes are the reviewed
+    // edit re-seated on new context, not the exact bytes shown at review time. Two
+    // guardrails: it may not touch any file the frozen diff didn't (a merge that
+    // widens the blast radius is not the change the owner approved), and the
+    // rebased diff is logged and stored so the timeline shows what really went out.
+    if (landed.mode === "rebased") {
+      const frozenFiles = new Set(changedFiles(proposal.diff));
+      const widened = changedFiles(landed.diff).filter((f) => !frozenFiles.has(f));
+      if (widened.length) {
+        logEvent(s.id, "approve_patch_invalid", `3-way merge widened the change to ${widened.join(", ")}; re-propose to rebuild it`);
+        notifyEscalation(s.id, s.prKey, "the saved proposal no longer applies cleanly; send an instruction to re-propose");
+        return "blocked";
+      }
+      logEvent(s.id, "approve_rebased", `frozen diff re-seated onto ${remoteSha.slice(0, 7)} via 3-way merge (base ${proposal.baseSha.slice(0, 7)}); pushing this rebased diff:\n${landed.diff.slice(0, 1000)}`);
+    }
+
+    // Re-gate the bytes that will actually be pushed on current HEAD.
     const isCi = s.authorClass === "ci";
     const ciClass = items.find((i) => i.ciClass)?.ciClass;
     const verdict: Verdict | null = s.verdictJson ? JSON.parse(s.verdictJson) : null;
@@ -500,7 +518,7 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
       s.repo,
       isCi
         ? { ciClass, testTarget: verdict?.ci_test_target }
-        : { light: true, changedFiles: changedFiles(proposal.diff) }
+        : { light: true, changedFiles: changedFiles(landed.diff) }
     );
     logEvent(s.id, "gate", `re-gate on approve: ${gate.detail.slice(0, 1000)}`);
     if (!gate.ran) {
@@ -512,7 +530,7 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
       // the owner already saw flagged. Approve is their informed override, so
       // push anyway. A failure that DOES reference the diff means the frozen
       // bytes no longer build on current HEAD — block and ask for a re-propose.
-      const changed = changedFiles(proposal.diff);
+      const changed = changedFiles(landed.diff);
       if (isCi || gateMentionsChangedFiles(gate.detail, changed)) {
         notifyEscalation(s.id, s.prKey, "proposal still applies but checks now fail on current HEAD; send an instruction to re-propose");
         return "blocked";
@@ -521,8 +539,8 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     }
 
     if (cfg.dryRun) {
-      logEvent(s.id, "dry_run", `approved; would commit+push.\n${proposal.diff.slice(0, 1000)}`);
-      updateThread(s.id, { diff: proposal.diff });
+      logEvent(s.id, "dry_run", `approved; would commit+push.\n${landed.diff.slice(0, 1000)}`);
+      updateThread(s.id, { diff: landed.diff });
       return settleProposal(s, { ...proposal, changeApplied: true });
     }
 
@@ -534,7 +552,7 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     const pushed = await headSha(dir);
     logEvent(s.id, "pushed", `pushed ${pushed.slice(0, 7)} to ${head.headRefName}`);
 
-    updateThread(s.id, { diff: proposal.diff, attemptCount: s.attemptCount + 1 });
+    updateThread(s.id, { diff: landed.diff, attemptCount: s.attemptCount + 1 });
     return settleProposal(s, { ...proposal, changeApplied: true });
   } finally {
     await removeWorktree(s.owner, s.repo, s.id).catch(() => {});

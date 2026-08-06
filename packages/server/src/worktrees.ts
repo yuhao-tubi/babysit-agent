@@ -435,30 +435,68 @@ export async function gitDiff(dir: string): Promise<string> {
 }
 
 /**
- * Check whether a unified diff still applies cleanly onto the worktree's current
- * tree (without modifying it). Used at Approve time: the frozen proposal was
- * built against an older base, so we verify the reviewed hunks still land before
- * pushing. Returns false if the patch no longer applies (the lines moved).
+ * Outcome of landing a frozen proposal diff on the worktree's current tree.
+ *
+ * - `exact`   — the frozen bytes applied verbatim (WYSIWYG; the common case).
+ * - `rebased` — the frozen bytes no longer matched their context, but a 3-way
+ *   merge re-seated the SAME edit onto the new tree with no conflict. `diff` is
+ *   the rebased result, which is what would actually be pushed — so callers must
+ *   re-gate and log it rather than trusting the frozen bytes.
+ * - `conflict` — a real overlap: upstream changed the very lines the proposal
+ *   edits. Only a re-propose can resolve it.
+ * - `invalid` — nothing landed at all: a malformed frozen diff, or the pre-image
+ *   blob is absent so no 3-way merge was possible.
  */
-export async function applyPatchCheck(dir: string, diff: string): Promise<boolean> {
-  const patch = join(dir, ".babysit-proposal.patch");
-  writeFileSync(patch, diff.endsWith("\n") ? diff : diff + "\n");
-  try {
-    await git(dir, ["apply", "--check", patch]);
-    return true;
-  } catch {
-    return false;
-  } finally {
-    rmSync(patch, { force: true });
-  }
-}
+export type PatchApply =
+  | { mode: "exact"; diff: string }
+  | { mode: "rebased"; diff: string }
+  | { mode: "conflict" }
+  | { mode: "invalid" };
 
-/** Apply a unified diff to the worktree (mutating it). Throws if it won't apply. */
-export async function applyPatch(dir: string, diff: string): Promise<void> {
+/**
+ * Land a frozen proposal diff on the worktree's CURRENT tree, falling back to a
+ * 3-way merge when plain context matching fails. Used at Approve time: the
+ * proposal was built against an older base, so its context lines may have moved
+ * even when its own target lines did not.
+ *
+ * Why this mutates instead of offering a `--check` variant: `git apply --3way
+ * --check` reports success (exit 0) even for a patch that would conflict — it
+ * prints "Applied patch ... with conflicts" and still returns 0. The only
+ * trustworthy conflict signal is to apply for real and inspect the index for
+ * unmerged entries. The worktree is throwaway, so we apply, and `git reset
+ * --hard` restores it on any failure (tracked files only — the shared
+ * node_modules and seeded build artifacts are untracked/ignored and survive).
+ *
+ * The 3-way merge needs the diff's pre-image blob (`index <old>..<new>` header)
+ * in the object database. The base clone has it, since it fetched the branch when
+ * the proposal was built; a shallow/fresh clone would not, and that surfaces as
+ * `invalid`.
+ */
+export async function applyPatchRebasing(dir: string, diff: string): Promise<PatchApply> {
   const patch = join(dir, ".babysit-proposal.patch");
   writeFileSync(patch, diff.endsWith("\n") ? diff : diff + "\n");
   try {
-    await git(dir, ["apply", patch]);
+    // 1. Plain apply: exact frozen bytes, no merge. Preferred — preserves WYSIWYG.
+    try {
+      await git(dir, ["apply", patch]);
+      return { mode: "exact", diff: await gitDiff(dir) };
+    } catch {
+      await git(dir, ["reset", "--hard"]);
+    }
+
+    // 2. 3-way merge. Reasons about CHANGES (via the pre-image blob) instead of
+    //    context strings, so a sibling edit elsewhere in the file — e.g. another
+    //    Thread on the same PR whose approval moved HEAD — no longer invalidates
+    //    this proposal. Exit code is unreliable here (see above); ignore it and
+    //    judge by the index + resulting diff.
+    await git(dir, ["apply", "--3way", patch]).catch(() => {});
+    const unmerged = (await git(dir, ["ls-files", "-u"])).trim();
+    const applied = await gitDiff(dir);
+    if (unmerged || !applied.trim()) {
+      await git(dir, ["reset", "--hard"]);
+      return { mode: unmerged ? "conflict" : "invalid" };
+    }
+    return { mode: "rebased", diff: applied };
   } finally {
     rmSync(patch, { force: true });
   }
