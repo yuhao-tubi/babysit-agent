@@ -19,6 +19,9 @@ export function classifyAuthor(login: string, userType: string): AuthorClass {
 /** Whether this login is the owner's (the agent posts under it too). */
 export function isOwnAuthor(login: string): boolean {
   const cfg = loadConfig();
+  // Unconfigured owner matches nobody — never let a blank login make every
+  // author look like the owner.
+  if (!cfg.githubLogin) return false;
   return login.toLowerCase() === cfg.githubLogin.toLowerCase();
 }
 

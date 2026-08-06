@@ -31,10 +31,10 @@ function installInBase(base: string, names: string[]): void {
 test("all declared deps present in base → safe to symlink", () => {
   const base = scratch();
   const wt = scratch();
-  installInBase(base, ["react", "@adrise/hls.js"]);
-  // Worktree bumped @adrise/hls.js to a different version — still the SAME
+  installInBase(base, ["react", "@myorg/hls.js"]);
+  // Worktree bumped @myorg/hls.js to a different version — still the SAME
   // package dir, so presence holds.
-  writePkg(wt, { react: "^18.0.0", "@adrise/hls.js": "npm:@adrise/hls.js@1.5.7-rc.56" });
+  writePkg(wt, { react: "^18.0.0", "@myorg/hls.js": "npm:@myorg/hls.js@1.5.7-rc.56" });
   assert.equal(allDepsPresentInBase(base, wt), true);
 });
 

@@ -10,7 +10,7 @@
  *
  * "Validate live" means we actually exercise the credentials before writing:
  *   - GH_TOKEN     → `gh api user` (confirms the token + resolves the login)
- *   - KeySmith key → mint a real Bedrock token (confirms key + model access)
+ *   - Bedrock TVM  → mint a real Bedrock token (confirms key + model access)
  *
  * Paths follow the same env overrides the daemon honors, so the wizard writes
  * exactly where `run` will later read (see Dockerfile / entrypoint.sh):
@@ -90,12 +90,12 @@ async function validateGitHub(token: string): Promise<string> {
 }
 
 /**
- * Confirm the KeySmith key mints a Bedrock token for the configured model.
+ * Confirm the Bedrock TVM key mints a token for the configured model.
  * Imported lazily so its module-level config read happens AFTER we've set the
  * env vars and (in setup) written config.json.
  */
-async function validateKeySmith(): Promise<string> {
-  const { getBedrockSession } = await import("./keysmith.js");
+async function validateBedrock(): Promise<string> {
+  const { getBedrockSession } = await import("./bedrock-auth.js");
   const session = await getBedrockSession();
   return session.modelArn;
 }
@@ -115,7 +115,7 @@ function writeEnv(vals: Record<string, string>): void {
   const path = envPath();
   mkdirSync(dirname(path), { recursive: true });
   const body =
-    "# Written by `setup`. KeySmith creds for Bedrock + GitHub token.\n" +
+    "# Written by `setup`. Bedrock TVM creds + GitHub token.\n" +
     "# gitignored / lives in the mounted data dir — treat as secret.\n" +
     Object.entries(vals)
       .map(([k, v]) => `${k}=${v}`)
@@ -152,18 +152,19 @@ async function runSetup(): Promise<void> {
   const detectedLogin = await validateGitHub(ghToken);
   console.log(`ok (login: ${detectedLogin})`);
 
-  // KeySmith creds.
+  // Bedrock Token Vending Machine creds (see bedrock-auth.ts for the protocol).
   explain([
-    "KeySmith — mints short-lived AWS Bedrock tokens so the agent can call Claude.",
-    "  Create an API key on the *My Keys* page (the secret is shown ONCE):",
-    "    https://keysmith.int.tubi.io   (docs: https://keysmith.int.tubi.io/docs)",
+    "Bedrock TVM — a service that mints short-lived AWS Bedrock bearer tokens,",
+    "  so this agent never holds long-lived AWS credentials. Point it at your",
+    "  organization's token vendor; the API key's secret is usually shown ONCE.",
     "  You'll paste three things below: the URL, the key id, and the secret.",
   ]);
-  const ksUrl = await ask("KeySmith URL", process.env.KEYSMITH_URL || "https://keysmith.int.tubi.io");
-  const ksKeyId = await ask("KeySmith key id (KEYSMITH_KEY_ID, e.g. 01J...)", process.env.KEYSMITH_KEY_ID);
-  if (!ksKeyId) throw new Error("KEYSMITH_KEY_ID is required.");
-  const ksSecret = await askSecret("KeySmith secret (KEYSMITH_SECRET, e.g. btv_...)", process.env.KEYSMITH_SECRET);
-  if (!ksSecret) throw new Error("KEYSMITH_SECRET is required.");
+  const tvmUrl = await ask("Bedrock TVM base URL (BEDROCK_TVM_URL)", process.env.BEDROCK_TVM_URL);
+  if (!tvmUrl) throw new Error("BEDROCK_TVM_URL is required.");
+  const tvmKeyId = await ask("TVM key id (BEDROCK_TVM_KEY_ID)", process.env.BEDROCK_TVM_KEY_ID);
+  if (!tvmKeyId) throw new Error("BEDROCK_TVM_KEY_ID is required.");
+  const tvmSecret = await askSecret("TVM secret (BEDROCK_TVM_SECRET)", process.env.BEDROCK_TVM_SECRET);
+  if (!tvmSecret) throw new Error("BEDROCK_TVM_SECRET is required.");
 
   // Config knobs.
   explain([
@@ -180,22 +181,22 @@ async function runSetup(): Promise<void> {
     ? allowReposRaw.split(",").map((s) => s.trim()).filter(Boolean)
     : [];
 
-  // Write .env, then config.json, THEN validate KeySmith (mint() reads both).
+  // Write .env, then config.json, THEN mint a token (mint() reads both).
   writeEnv({
     GH_TOKEN: ghToken,
     GITHUB_TOKEN: ghToken,
-    KEYSMITH_URL: ksUrl,
-    KEYSMITH_KEY_ID: ksKeyId,
-    KEYSMITH_SECRET: ksSecret,
+    BEDROCK_TVM_URL: tvmUrl,
+    BEDROCK_TVM_KEY_ID: tvmKeyId,
+    BEDROCK_TVM_SECRET: tvmSecret,
   });
-  process.env.KEYSMITH_URL = ksUrl;
-  process.env.KEYSMITH_KEY_ID = ksKeyId;
-  process.env.KEYSMITH_SECRET = ksSecret;
+  process.env.BEDROCK_TVM_URL = tvmUrl;
+  process.env.BEDROCK_TVM_KEY_ID = tvmKeyId;
+  process.env.BEDROCK_TVM_SECRET = tvmSecret;
 
   writeConfig({ githubLogin, allowRepos });
 
-  process.stdout.write("  → validating KeySmith (minting a Bedrock token)… ");
-  const modelArn = await validateKeySmith();
+  process.stdout.write("  → validating Bedrock TVM (minting a token)… ");
+  const modelArn = await validateBedrock();
   console.log(`ok\n     model → ${modelArn}`);
 
   console.log(`\nWrote ${envPath()}\nWrote ${configPath()}`);
@@ -228,10 +229,10 @@ async function runDoctor(): Promise<void> {
   }
 
   try {
-    const modelArn = await validateKeySmith();
-    console.log(`KeySmith: ✓ minted token (model: ${modelArn})`);
+    const modelArn = await validateBedrock();
+    console.log(`Bedrock: ✓ minted token (model: ${modelArn})`);
   } catch (err) {
-    console.log(`KeySmith: ✗ ${(err as Error).message}`);
+    console.log(`Bedrock: ✗ ${(err as Error).message}`);
     ok = false;
   }
 

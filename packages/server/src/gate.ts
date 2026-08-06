@@ -93,8 +93,8 @@ export async function runGate(dir: string, repo: string, opts: GateOpts = {}): P
       // Monorepo prerequisite: `typecheck-app` (tsc --noEmit) resolves the
       // workspace packages via their built `lib/*.d.ts`, but `yarn install` only
       // symlinks them — the .d.ts don't exist until each package is compiled.
-      // Without this, www's typecheck floods with TS2307 "Cannot find module
-      // '@adrise/*'" for every internal package. `pre-build` (lerna run build)
+      // Without this, the typecheck floods with TS2307 "Cannot find module
+      // '@myorg/*'" for every internal package. `pre-build` (lerna run build)
       // compiles them. Run it first when present; a failure fails the gate.
       if (scripts["pre-build"]) {
         const pb = await run(runner, hasYarn ? ["pre-build"] : ["run", "pre-build"], dir);
@@ -185,7 +185,7 @@ async function runLightGate(
   // Monorepo cross-package staleness fix: the light gate typechecks the app
   // against sibling packages' seeded `lib/*.d.ts` (from the base clone). When
   // the diff itself changes a workspace package (e.g. adds an export to
-  // `@adrise/player`), those seeded `.d.ts` are STALE — `typecheck-app` then
+  // `@myorg/some-pkg`), those seeded `.d.ts` are STALE — `typecheck-app` then
   // reports the PR's own new symbols as "missing" in files the diff didn't
   // touch (a false failure that escalates as inconclusive). Rebuild ONLY the
   // touched packages first (scoped, not the whole `pre-build` fan-out) so the
@@ -229,7 +229,7 @@ async function runLightGate(
 /**
  * Rebuild the workspace packages the diff touched, scoped via `lerna run build
  * --scope`. Maps each changed `packages/<dir>/…` path to that package's declared
- * `name` (the lerna scope — a dir like `player` is package `@adrise/player`),
+ * `name` (the lerna scope — a dir like `foo` is package `@myorg/foo`),
  * keeps only packages that have their own `build` script, and rebuilds just
  * those. Deliberately NOT the whole `pre-build` (`rm -rf build && lerna run
  * build` over every package): that is the slow, all-packages fan-out we're

@@ -1,6 +1,6 @@
 # PR Resources — additive spec
 
-Status: draft for review · Date: 2026-07-17 · Author lens: Leo
+Status: draft for review · Date: 2026-07-17 · Author lens: maintainer
 
 ## What this is
 

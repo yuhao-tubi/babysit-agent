@@ -228,7 +228,7 @@ A plain in-diff bug (an off-by-one in the changed function itself) FAILS part 2 
 - Experiment integrity: exposure logged before/outside the gate check (pollutes unenrolled users), control path mutated, wrong bucketing key, treatment leaks into holdout.
 
 # Layer split (do this FIRST, in your head)
-Partition the diff into ITS OWN layers — a www PR might be analytics / experiment / UI-UX / logic; another repo surfaces different ones. YOU name the layers from the code; nothing is hardcoded. Then hunt each layer. Tag every finding with its "layer".
+Partition the diff into ITS OWN layers — one PR might split into analytics / experiment / UI-UX / logic; another repo surfaces different ones. YOU name the layers from the code; nothing is hardcoded. Then hunt each layer. Tag every finding with its "layer".
 
 # Every finding is fact + fact + question (never a verdict)
 Decompose each Blind spot into: (fact) the code does X at file:line, (fact) X has downstream consequence Y, (question) did you intend X? Phrase "explanation" as a why-it-matters chain ending in a QUESTION ("…so it counts views after the API returns, not on tap. Intended?"). NEVER assert intent is wrong — you cannot see the author's head, only the code.

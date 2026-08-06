@@ -85,7 +85,7 @@ export async function ensureBase(owner: string, repo: string): Promise<string> {
   await git(dir, ["checkout", "--force", "-B", BASE_BRANCH, `origin/${BASE_BRANCH}`]);
   await git(dir, ["reset", "--hard", `origin/${BASE_BRANCH}`]);
 
-  // Repo-specific host prep (e.g. www needs GitHub Packages auth) BEFORE deps —
+  // Repo-specific host prep (e.g. private-registry auth, see config.repoSetup) BEFORE deps —
   // otherwise provisionDeps' `yarn install` 401s on private packages.
   await runRepoSetup({ owner, repo, dir });
   await provisionDeps(dir);
@@ -198,7 +198,7 @@ export async function addWorktree(
 /**
  * Seed the base clone's already-compiled, gitignored build outputs into the
  * worktree so the gate doesn't have to rebuild them. A monorepo's internal
- * packages (e.g. www's `@adrise/*`) resolve via each package's built
+ * packages (e.g. a `@myorg/*` scope) resolve via each package's built
  * `lib/*.d.ts`, but those are gitignored — a fresh `git worktree add` doesn't
  * bring them, which is what forces `pre-build` (`lerna run build`) to run before
  * every typecheck. The base clone builds them once (during CI-fix gates); reuse
@@ -289,7 +289,7 @@ export function allDepsPresentInBase(base: string, wt: string): boolean {
  * source — see gate.ts runLightGate): symlink even when the lockfile diverged,
  * SO LONG AS every package the PR declares is already installed in base. This
  * skips the multi-GB CoW copy + full `yarn install` that a single version bump
- * (e.g. one @adrise/* patch) would otherwise force, since a typecheck/lint gate
+ * (e.g. one internal-package patch) would otherwise force, since a typecheck/lint gate
  * doesn't depend on exact dep VERSIONS — only on the modules being resolvable.
  * A PR that adds a brand-new dependency still takes the copy+install path. NOT
  * used for CI-fix / full-gate threads, which run the real test suite and need
@@ -474,6 +474,12 @@ export async function applyPatch(dir: string, diff: string): Promise<void> {
  */
 function commitIdentityArgs(): string[] {
   const { githubLogin } = loadConfig();
+  if (!githubLogin) {
+    throw new Error(
+      "githubLogin is not configured — set it in config.json (or run `make setup`) " +
+        "so auto-fix commits have a stable author identity."
+    );
+  }
   return [
     "-c",
     `user.name=${githubLogin}`,

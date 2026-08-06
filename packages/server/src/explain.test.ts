@@ -8,7 +8,7 @@ process.env.BABYSIT_DATA_DIR = mkdtempSync(join(tmpdir(), "babysit-explain-test-
 
 const { isGrounded, buildExplainPrompt, explainWorktreeKey } = await import("./explain.js");
 
-const BLOB = "https://github.com/adRise/www/blob/abc123";
+const BLOB = "https://github.com/owner/repo/blob/abc123";
 
 test("isGrounded accepts a doc citing at least one permalink", () => {
   const md = `The flush is safe because the socket is drained first —
@@ -33,7 +33,7 @@ sequenceDiagram
 
 test("isGrounded rejects a permalink to a DIFFERENT repo/sha", () => {
   // A link to some other tree isn't grounding in THIS checkout.
-  const md = `See https://github.com/adRise/www/blob/deadbeef/src/other.ts#L1`;
+  const md = `See https://github.com/owner/repo/blob/deadbeef/src/other.ts#L1`;
   assert.equal(isGrounded(md, BLOB), false);
 });
 
@@ -51,7 +51,7 @@ test("isGrounded requires a line anchor, not a bare file link", () => {
 
 test("buildExplainPrompt uses the Thread's feedback when no question is given", () => {
   const p = buildExplainPrompt(
-    { prKey: "adRise/www#1", threadKey: "thread:5", authorClass: "human" } as any,
+    { prKey: "owner/repo#1", threadKey: "thread:5", authorClass: "human" } as any,
     [{ author: "bafolts", authorType: "User", kind: "review_comment", body: "When does X become true?", path: "src/a.ts", line: 4 } as any],
     BLOB,
     null
@@ -64,7 +64,7 @@ test("buildExplainPrompt uses the Thread's feedback when no question is given", 
 
 test("buildExplainPrompt puts the owner's follow-up question front and center", () => {
   const p = buildExplainPrompt(
-    { prKey: "adRise/www#1", threadKey: "thread:5", authorClass: "human" } as any,
+    { prKey: "owner/repo#1", threadKey: "thread:5", authorClass: "human" } as any,
     [{ author: "bafolts", authorType: "User", kind: "review_comment", body: "When does X become true?" } as any],
     BLOB,
     "Explain the retry ledger instead"

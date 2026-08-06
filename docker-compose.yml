@@ -22,7 +22,7 @@ services:
       - PUID=${PUID:-}
       - PGID=${PGID:-}
       # Node's default heap (~2GB) is too small for big monorepos' `tsc --noEmit`
-      # (adRise/www's typecheck OOMs, SIGABRT 134). Raise it for every Node child
+      # (a large monorepo's typecheck OOMs, SIGABRT 134). Raise it for every Node child
       # the gate/agent shells out to. Keep it below the container memory limit.
       - NODE_OPTIONS=--max-old-space-size=8192
     deploy:

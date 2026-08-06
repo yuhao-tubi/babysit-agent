@@ -10,11 +10,17 @@ SHELL := /bin/bash
 # Dashboard + API port (kept in sync with config.json and docker-compose.yml).
 SERVER_PORT := 4317
 
-# launchd (installed daemon) — see launchd/io.tubi.babysit-agent.plist
-LAUNCHD_LABEL  := io.tubi.babysit-agent
-LAUNCHD_PLIST  := launchd/$(LAUNCHD_LABEL).plist
-LAUNCHD_DEST   := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
-LAUNCHD_DOMAIN := gui/$(shell id -u)
+# launchd (installed daemon). The committed file is a TEMPLATE with placeholders
+# (__WORKDIR__, __NODE_BIN__, …); `make start` renders it into ~/Library/
+# LaunchAgents so no host-specific path is ever committed.
+LAUNCHD_LABEL    := local.babysit-agent
+LAUNCHD_TEMPLATE := launchd/babysit-agent.plist.template
+LAUNCHD_DEST     := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
+LAUNCHD_DOMAIN   := gui/$(shell id -u)
+# Resolve the node/npm that will run the daemon from the CURRENT shell (nvm-safe).
+LAUNCHD_NODE     := $(shell command -v node)
+LAUNCHD_NPM_CLI  := $(shell node -e 'console.log(require("path").join(process.execPath,"..","..","lib","node_modules","npm","bin","npm-cli.js"))' 2>/dev/null)
+LAUNCHD_NODE_DIR := $(patsubst %/,%,$(dir $(LAUNCHD_NODE)))
 # Daemon logs live alongside state under the workspace .data/ (see the plist).
 DAEMON_OUT_LOG := $(CURDIR)/.data/daemon.out.log
 DAEMON_ERR_LOG := $(CURDIR)/.data/daemon.err.log
@@ -113,8 +119,17 @@ dev: ## Run the daemon in the foreground (tsx watch; Ctrl-C to stop)
 	npm run dev:server
 
 .PHONY: start
-start: ## Install & load the launchd agent (symlink plist, bootstrap)
-	@ln -sf "$(CURDIR)/$(LAUNCHD_PLIST)" "$(LAUNCHD_DEST)"
+start: ## Install & load the launchd agent (render plist from template, bootstrap)
+	@test -x "$(LAUNCHD_NODE)" || { echo "no node on PATH — cannot render the plist"; exit 1; }
+	@test -f "$(LAUNCHD_NPM_CLI)" || { echo "npm-cli.js not found next to $(LAUNCHD_NODE)"; exit 1; }
+	@mkdir -p "$(HOME)/Library/LaunchAgents"
+	@sed -e 's|__LABEL__|$(LAUNCHD_LABEL)|g' \
+	     -e 's|__NODE_BIN__|$(LAUNCHD_NODE)|g' \
+	     -e 's|__NPM_CLI__|$(LAUNCHD_NPM_CLI)|g' \
+	     -e 's|__WORKDIR__|$(CURDIR)|g' \
+	     -e 's|__HOME__|$(HOME)|g' \
+	     -e 's|__PATH__|$(LAUNCHD_NODE_DIR):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin|g' \
+	     "$(CURDIR)/$(LAUNCHD_TEMPLATE)" > "$(LAUNCHD_DEST)"
 	@launchctl bootstrap "$(LAUNCHD_DOMAIN)" "$(LAUNCHD_DEST)" 2>/dev/null || \
 		launchctl load "$(LAUNCHD_DEST)"
 	@echo "daemon installed and loaded ($(LAUNCHD_LABEL)). Dashboard: http://localhost:$(SERVER_PORT)"

@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getBedrockSession, resolveModelArn } from "./keysmith.js";
+import { getBedrockSession, resolveModelArn } from "./bedrock-auth.js";
 import type { CheckAllowEntry } from "./ci.js";
 import type { AuthorClass } from "./types.js";
 
@@ -16,6 +16,22 @@ export interface CiConfig {
   enabledRepos: string[];
   /** Which checks to babysit, and the gate class each maps to. */
   checkAllowlist: CheckAllowEntry[];
+}
+
+/**
+ * Host-level prep a specific target repo needs before `yarn install` can resolve
+ * its deps (see repo-setup.ts). Keyed by "owner/repo" (or a bare repo name, any
+ * owner) in `Config.repoSetup`.
+ */
+export interface RepoSetupConfig {
+  /**
+   * npm scope whose packages live on a private registry (e.g. "@myorg"). Written
+   * to `~/.npmrc` together with `npmRegistry`, authenticated with
+   * NPM_TOKEN/GH_TOKEN. Both keys must be set for the step to run.
+   */
+  npmScope?: string;
+  /** Registry serving `npmScope` (e.g. "https://npm.pkg.github.com/"). */
+  npmRegistry?: string;
 }
 
 export interface Config {
@@ -74,7 +90,7 @@ export interface Config {
    * always vetoes auto-push regardless of this list.
    */
   autoPushClasses: AuthorClass[];
-  /** KeySmith friendly model name to resolve to a Bedrock inference-profile ARN (e.g. "claude-opus"). */
+  /** TVM friendly model name to resolve to a Bedrock inference-profile ARN (e.g. "claude-opus"). */
   bedrockModelName: string;
   /** CI-feedback settings. */
   ci: CiConfig;
@@ -82,6 +98,12 @@ export interface Config {
   overview: OverviewConfig;
   /** Thread-level Explanation settings (a read-only, on-demand Thread artifact). */
   explain: ExplainConfig;
+  /**
+   * Per-repo host prep, keyed by "owner/repo" (or a bare repo name, any owner).
+   * Empty = no repo needs bespoke provisioning; the generic clone + install path
+   * is used everywhere. See repo-setup.ts.
+   */
+  repoSetup: Record<string, RepoSetupConfig>;
 }
 
 /**
@@ -107,12 +129,12 @@ export interface OverviewConfig {
   /** Agent turn budget for the read-only PR-wide investigation. */
   maxTurns: number;
   /**
-   * KeySmith model for the READ-ONLY, reviewer-facing artifacts — reviewer
+   * Model for the READ-ONLY, reviewer-facing artifacts — reviewer
    * overview + Verified Risk Analysis, the PR-comprehension quiz, and reviewer
    * Q&A. These consume-or-ask flows favor speed, so they run on a faster/cheaper
    * model than the author path. Author overview + Blind spots stay on
    * `bedrockModelName` (opus), as does the whole verdict/gate/executor push path.
-   * Must be a model the KeySmith token can invoke. Default `claude-sonnet`.
+   * Must be a model the TVM token can invoke. Default `claude-sonnet`.
    */
   reviewerModelName: string;
 }
@@ -124,7 +146,9 @@ function expandHome(p: string): string {
 }
 
 const DEFAULTS: Config = {
-  githubLogin: "yuhao-tubi",
+  // No default owner — `make setup` (or config.json) must supply it. Blank means
+  // classify.ts can never mistake someone else's login for the owner's.
+  githubLogin: "",
   pollIntervalMs: 300_000,
   port: 4317,
   dryRun: true,
@@ -140,8 +164,8 @@ const DEFAULTS: Config = {
   maxThreadAttempts: 2,
   maxGateFixAttempts: 2,
   maxProposalFiles: 5,
-  // Raised from 40/60: a bot nit on adRise/www routinely spent the whole budget
-  // just locating the cited code, and the run ended with no verdict.
+  // Raised from 40/60: on a large monorepo, a bot nit routinely spent the whole
+  // budget just locating the cited code, and the run ended with no verdict.
   verdictMaxTurns: 60,
   verdictCiMaxTurns: 80,
   botLogins: [
@@ -152,14 +176,15 @@ const DEFAULTS: Config = {
     "codex-connector[bot]",
     "github-actions[bot]",
   ],
-  ignoreAuthors: ["tubi-laborador", "github-actions"],
+  ignoreAuthors: ["github-actions", "dependabot"],
   ignoreRepos: [],
-  // Hard-scope the whole pipeline to the one repo whose build/lint env we know.
-  allowRepos: ["adRise/www"],
+  // Blank = every authored PR is in scope. Set this in config.json to hard-scope
+  // the pipeline to the repos whose build/lint env you have verified.
+  allowRepos: [],
   // Default: nothing auto-pushes — every change parks for owner Approve.
   autoPushClasses: [],
-  // Agent SDK auth goes through KeySmith (Bedrock bearer tokens), not an AWS
-  // profile. This selects which inference-profile ARN to invoke; see keysmith.ts.
+  // Agent SDK auth goes through the Bedrock TVM (bearer tokens), not an AWS
+  // profile. This selects which inference-profile ARN to invoke; see bedrock-auth.ts.
   bedrockModelName: "claude-opus",
   ci: {
     // Per-repo opt-in. Empty = CI babysitting OFF everywhere — the current
@@ -193,6 +218,7 @@ const DEFAULTS: Config = {
     // budget (verdictMaxTurns) rather than the PR-wide overview budget.
     maxTurns: 60,
   },
+  repoSetup: {},
 };
 
 let cached: Config | null = null;
@@ -260,7 +286,7 @@ export function loadConfig(): Config {
  * routing must be supplied explicitly here — otherwise the SDK defaults to the
  * direct Anthropic API and rejects the Bedrock model id.
  *
- * Auth is a KeySmith-vended bearer token (AWS_BEARER_TOKEN_BEDROCK), not an AWS
+ * Auth is a TVM-vended bearer token (AWS_BEARER_TOKEN_BEDROCK), not an AWS
  * profile. The model must be the inference-profile ARN that token is scoped to.
  * Async because minting/refreshing the token is a network call.
  *

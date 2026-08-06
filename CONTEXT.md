@@ -4,7 +4,7 @@ Ubiquitous language for this project. Glossary only — no implementation detail
 
 - **Poll cycle** — one pass of the daemon: discover the PRs you authored (skipping `ignoreRepos`), fetch all their feedback grouped by thread, and upsert a Thread-unit for every thread with actionable, non-resolved feedback. Idempotent: unit existence is derived from live GitHub state each poll, not from first-sight.
 
-- **Session** — a PR and all its Threads. The PR-level grouping for triage and the dashboard; it is *not* itself a status-bearing unit (its status is rolled up from its Threads). Discovered PRs in `ignoreRepos` (e.g. `adRise/chatgpt-app`) are skipped entirely.
+- **Session** — a PR and all its Threads. The PR-level grouping for triage and the dashboard; it is *not* itself a status-bearing unit (its status is rolled up from its Threads). Discovered PRs in `ignoreRepos` (e.g. `owner/some-repo`) are skipped entirely.
 
 - **Expired Session** — a Session whose PR has merged or closed (fallen out of the live open set the poll cycle observes). It is *retained*, not deleted: its Threads and history stay queryable and it is surfaced in the dashboard's own **Expired** section. The pipeline never acts on an expired Session's Threads. Re-appearing in the open set un-expires it.
 
@@ -24,7 +24,7 @@ Ubiquitous language for this project. Glossary only — no implementation detail
 
 - **Options** — for an `escalate` Verdict, the concrete choices the agent sees. In the dashboard they are clickable chips that pre-fill the Instruction box; selecting one does not run the agent by itself.
 
-- **Pre-push gate** — the objective self-verification a change must pass: the repo's build/test, or a repo-type validator when there is no test suite. Run when a Proposal is built, and again at Approve time against the current HEAD. CI-failure fixes run the **full** gate (`pre-build` → typecheck → lint → the failing check's class). Owner-reviewed proposals run a **light** gate scoped to the diff: for a monorepo it first rebuilds **only the workspace packages the diff touched** (`lerna run build --scope`, not the whole `pre-build` fan-out) so the app typechecks against fresh sibling `.d.ts` — otherwise a diff that adds an export to a workspace package (e.g. `@adrise/player`) makes `typecheck-app` report the PR's own new symbols as "missing" — then runs an incremental `typecheck-app` and lints only the changed files.
+- **Pre-push gate** — the objective self-verification a change must pass: the repo's build/test, or a repo-type validator when there is no test suite. Run when a Proposal is built, and again at Approve time against the current HEAD. CI-failure fixes run the **full** gate (`pre-build` → typecheck → lint → the failing check's class). Owner-reviewed proposals run a **light** gate scoped to the diff: for a monorepo it first rebuilds **only the workspace packages the diff touched** (`lerna run build --scope`, not the whole `pre-build` fan-out) so the app typechecks against fresh sibling `.d.ts` — otherwise a diff that adds an export to a workspace package (e.g. `@myorg/some-pkg`) makes `typecheck-app` report the PR's own new symbols as "missing" — then runs an incremental `typecheck-app` and lints only the changed files.
 
 - **Escalation** — a Thread that needs your judgment (a decision, not a change). It is marked **blocked**, fires a notification (coalesced per PR), and waits for your Instruction.
 

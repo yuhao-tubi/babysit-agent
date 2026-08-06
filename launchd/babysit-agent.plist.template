@@ -1,38 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template — `make start` substitutes the placeholders below and writes the real
+  plist to ~/Library/LaunchAgents/. Nothing host-specific is committed here.
+
+    __LABEL__      launchd label (LAUNCHD_LABEL in the Makefile)
+    __NODE_BIN__   absolute path to the `node` that provides npm (nvm-safe)
+    __NPM_CLI__    absolute path to npm-cli.js for that node
+    __WORKDIR__    this workspace's absolute path
+    __HOME__       the invoking user's home dir
+    __PATH__       PATH for the daemon (launchd starts with a bare one)
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>io.tubi.babysit-agent</string>
+    <string>__LABEL__</string>
 
-    <!-- Run `npm run dev:server` (tsx watch) via the nvm node that provides npm. -->
+    <!-- Run `npm run dev:server` (tsx watch) via the node that provides npm. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/leo/.nvm/versions/node/v22.13.0/bin/node</string>
-        <string>/Users/leo/.nvm/versions/node/v22.13.0/lib/node_modules/npm/bin/npm-cli.js</string>
+        <string>__NODE_BIN__</string>
+        <string>__NPM_CLI__</string>
         <string>run</string>
         <string>dev:server</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/leo/dev/tubi/ai_workspaces/babysit-agent</string>
+    <string>__WORKDIR__</string>
 
     <!-- launchd starts with a bare PATH; the daemon shells out to `gh` (Homebrew)
          and spawns `node` for tsx, so both dirs must be present. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/leo/.nvm/versions/node/v22.13.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>__PATH__</string>
         <key>HOME</key>
-        <string>/Users/leo</string>
+        <string>__HOME__</string>
         <!-- Root all heavy state (SQLite + repo clones + worktrees + CI logs)
              under the workspace `.data/` — the SAME dir the Docker path
              bind-mounts. A native process reads it at full disk speed (none of
              the VirtioFS tax the container pays), so switching between the
-             launchd and Docker paths reuses one state dir: the www clone and
-             any in-flight threads survive the switch. -->
+             launchd and Docker paths reuses one state dir: base clones and any
+             in-flight threads survive the switch. -->
         <key>BABYSIT_DATA_DIR</key>
-        <string>/Users/leo/dev/tubi/ai_workspaces/babysit-agent/.data</string>
+        <string>__WORKDIR__/.data</string>
     </dict>
 
     <!-- Login item: start at load and keep it running. -->
@@ -47,8 +58,8 @@
 
     <!-- Logs live under the same `.data/` as state — one dir to tail. -->
     <key>StandardOutPath</key>
-    <string>/Users/leo/dev/tubi/ai_workspaces/babysit-agent/.data/daemon.out.log</string>
+    <string>__WORKDIR__/.data/daemon.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/leo/dev/tubi/ai_workspaces/babysit-agent/.data/daemon.err.log</string>
+    <string>__WORKDIR__/.data/daemon.err.log</string>
 </dict>
 </plist>

@@ -10,7 +10,7 @@ FROM node:22-bookworm
 # --- OS tooling the daemon shells out to --------------------------------------
 #   git        clone / fast-forward push (worktrees.ts, gh.ts)
 #   gh         all GitHub API + push operations (gh.ts)
-#   yarn       target repos (e.g. adRise/www) install via `yarn --frozen-lockfile`
+#   yarn       yarn-based target repos install via `yarn --frozen-lockfile`
 #   gosu       drop privileges to the host UID at runtime (entrypoint)
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates gnupg git gosu \

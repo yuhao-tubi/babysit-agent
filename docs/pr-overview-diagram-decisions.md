@@ -38,7 +38,7 @@
 >   message (`make setup-render`); the daemon keeps polling, Threads untouched.
 > - **Acceptance:** Rungs 1–2 automated in `render.test.ts` (real headless render
 >   of a fixture + round-trip + failure paths; skip when Chromium absent). Rungs
->   3–5 (CLI single-PR generation on adRise/www#33782, Save/Regenerate write
+>   3–5 (CLI single-PR generation on owner/repo#33782, Save/Regenerate write
 >   path, daemon in-situ) are the manual gate.
 >
 > Everything below (the React-Flow `DiagramSpec` block and the original SVG
@@ -167,7 +167,7 @@ the dashboard.
     + reviewer (thread-less) rows; web shows a purple REVIEW tag + "Overview
     only", defaults the node open. Reviewer discovery is feature-gated on
     `overview.enabled` and STILL honors `allowRepos`/`ignoreRepos` (decision:
-    keep the existing scope — only adRise/www review requests show). Verified:
+    keep the existing scope — only in-scope repos' review requests show). Verified:
     poll-once lands the 3 www reviewer PRs; out-of-scope repos filtered.
 
 21. **skipDeps for read-only worktrees:** `addWorktree` grew an
@@ -177,7 +177,7 @@ the dashboard.
     deps was 6+ min of pure waste that stalled every generation. With skipDeps
     the worktree is ready in seconds. Also added a `logEvent` at generation
     START (was only logging on completion — no observability while running).
-    VERIFIED end-to-end on adRise/www#30997: ready in ~3min, valid 5.9KB SVG
+    VERIFIED end-to-end on owner/repo#30997: ready in ~3min, valid 5.9KB SVG
     served at image/svg+xml, overview correctly traced blast radius + flagged a
     real lazy-initializer timing bug.
 

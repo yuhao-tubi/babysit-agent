@@ -1,18 +1,21 @@
 /**
- * KeySmith — Tubi's Bedrock Token Vending Machine.
+ * Bedrock auth via a Token Vending Machine (TVM).
  *
- * We do not hold AWS credentials. Instead we sign a request with our KeySmith
- * key (HMAC-SHA256) and receive a short-lived Bedrock *bearer* token plus the
+ * We do not hold AWS credentials. Instead we sign a request with our TVM key
+ * (HMAC-SHA256) and receive a short-lived Bedrock *bearer* token plus the
  * Application Inference Profile ARNs our profile is allowed to invoke. The
  * token feeds the Agent SDK via AWS_BEARER_TOKEN_BEDROCK; the ARN is the only
  * model id the token's IAM role may call (the plain inference-profile id is
  * denied by a service control policy).
  *
+ * The vendor endpoint is entirely configuration: set BEDROCK_TVM_URL,
+ * BEDROCK_TVM_KEY_ID and BEDROCK_TVM_SECRET in `.env` (see `.env.example`).
+ * The wire protocol is a signed `POST /api/v1/tokens` — see `mint()` below for
+ * the exact signing string and headers if you point this at your own service.
+ *
  * Token lifecycle: mint-on-demand with a single cached value, refreshed ~5 min
  * before expiry. A failed mint throws (never caches) and lets the pipeline move
  * the Thread to `error` for retry next poll cycle — we do not retry here.
- *
- * See https://keysmith.int.tubi.io/docs
  */
 import { createHash, createHmac } from "node:crypto";
 import { loadConfig } from "./config.js";
@@ -30,11 +33,11 @@ export interface BedrockSession {
   /** Application Inference Profile ARN for the configured DEFAULT model (`bedrockModelName`) — the SDK `model`. */
   modelArn: string;
   /**
-   * ALL model ARNs the minted token may invoke, keyed by KeySmith friendly name
+   * ALL model ARNs the minted token may invoke, keyed by the TVM's friendly name
    * (e.g. `claude-opus`, `claude-sonnet`). One token covers every model in the
    * profile (see `allowedModels` in the token response), so a caller can pick a
    * cheaper/faster model per task WITHOUT minting a second token. Resolve via
-   * `modelArnFor`.
+   * `resolveModelArn`.
    */
   models: Record<string, string>;
   /** Epoch ms after which the token must be re-minted. */
@@ -56,7 +59,7 @@ function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) {
     throw new Error(
-      `KeySmith: missing ${name}. Set it in .env (see .env.example).`
+      `bedrock-auth: missing ${name}. Set it in .env (see .env.example).`
     );
   }
   return v;
@@ -65,9 +68,9 @@ function requireEnv(name: string): string {
 /** POST a signed token request and return the parsed response. Throws on failure. */
 async function mint(): Promise<BedrockSession> {
   const cfg = loadConfig();
-  const url = requireEnv("KEYSMITH_URL");
-  const keyId = requireEnv("KEYSMITH_KEY_ID");
-  const secret = requireEnv("KEYSMITH_SECRET");
+  const url = requireEnv("BEDROCK_TVM_URL");
+  const keyId = requireEnv("BEDROCK_TVM_KEY_ID");
+  const secret = requireEnv("BEDROCK_TVM_SECRET");
 
   const body = JSON.stringify({ ttlSeconds: TTL_SECONDS });
   const bodyHash = createHash("sha256").update(body).digest("hex");
@@ -91,7 +94,7 @@ async function mint(): Promise<BedrockSession> {
     });
   } catch (err) {
     throw new Error(
-      `KeySmith: token request failed (network): ${(err as Error).message}`
+      `bedrock-auth: token request failed (network): ${(err as Error).message}`
     );
   }
   if (!res.ok) {
@@ -99,7 +102,7 @@ async function mint(): Promise<BedrockSession> {
     // errors show here). Never logs the token or secret.
     const text = (await res.text().catch(() => "")).slice(0, 300);
     throw new Error(
-      `KeySmith: token request rejected ${res.status} ${res.statusText}: ${text}`
+      `bedrock-auth: token request rejected ${res.status} ${res.statusText}: ${text}`
     );
   }
 
@@ -109,7 +112,7 @@ async function mint(): Promise<BedrockSession> {
   if (!match) {
     const available = (data.models ?? []).map((m) => m.name).join(", ");
     throw new Error(
-      `KeySmith: model "${want}" not in profile "${data.profile}". Available: ${available || "(none)"}`
+      `bedrock-auth: model "${want}" not in profile "${data.profile}". Available: ${available || "(none)"}`
     );
   }
 
@@ -139,7 +142,7 @@ export async function getBedrockSession(): Promise<BedrockSession> {
 }
 
 /**
- * Resolve the inference-profile ARN for a KeySmith friendly model name (e.g.
+ * Resolve the inference-profile ARN for a friendly model name (e.g.
  * `claude-sonnet`) under the current token. `undefined`/empty falls back to the
  * default model (`bedrockModelName`). Throws if the requested name isn't one the
  * token may invoke — a config typo should fail loudly, not silently downgrade.
@@ -151,7 +154,7 @@ export async function resolveModelArn(name?: string): Promise<string> {
   if (!arn) {
     const available = Object.keys(session.models).join(", ");
     throw new Error(
-      `KeySmith: model "${name}" not vended by the current token. Available: ${available || "(none)"}`
+      `bedrock-auth: model "${name}" not vended by the current token. Available: ${available || "(none)"}`
     );
   }
   return arn;

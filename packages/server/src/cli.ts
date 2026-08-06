@@ -148,15 +148,17 @@ async function main() {
       break;
     }
     case "gate": {
-      const owner = "adRise";
-      const repo = process.argv[3];
+      //   cli.ts gate <owner/repo>
+      const target = process.argv[3] ?? "";
+      const [owner, repo] = target.split("/");
+      if (!owner || !repo) throw new Error("usage: cli.ts gate <owner/repo>");
       const r = await runGate(clonePath(owner, repo), repo);
       console.log(`ran=${r.ran} passed=${r.passed}`);
       console.log(r.detail.slice(0, 800));
       break;
     }
     default:
-      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|blindspots <prKey>|explain <threadId> [question]|process <id>|retry-errors|gate <repo>>");
+      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|blindspots <prKey>|explain <threadId> [question]|process <id>|retry-errors|gate <owner/repo>>");
       process.exit(1);
   }
 }

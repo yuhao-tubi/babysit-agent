@@ -126,7 +126,7 @@ export async function pollOnce(): Promise<PollResult> {
         // act on resolved).
         if (fb.resolvedThreadKeys.has(group.threadKey)) continue;
 
-        // Ignored authors (e.g. tubi-laborador, github-actions): never triage —
+        // Ignored authors (e.g. github-actions, dependabot): never triage —
         // resolve directly, no Verdict. CI is exempt (its synthetic author is
         // classed separately via the CI pipeline).
         if (!isCi && isIgnoredAuthor(group.rootAuthor)) {

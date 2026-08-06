@@ -42,8 +42,9 @@ each credential live, and only then writes** `./.env` + `./config.json`:
 - **GitHub token** — a PAT with `repo` scope (`gh` uses it for both the API and
   raw `git push`). Validated with `gh api user`, which also resolves your login.
   Already logged into `gh`? Paste the output of `gh auth token`.
-- **KeySmith key** — mints short-lived Bedrock tokens so the agent can call
-  Claude. Validated by minting a real token against your configured model.
+- **Bedrock TVM key** — a token vending machine that mints short-lived Bedrock
+  bearer tokens so the agent can call Claude without long-lived AWS credentials.
+  Validated by minting a real token against your configured model.
 
 It fills `githubLogin` + `allowRepos` in `config.json` from your answers; edit
 the rest by hand (see [Configuration](#configuration)). Re-validate the existing
@@ -59,10 +60,12 @@ make doctor      # re-check ./.env + ./config.json creds without prompting
 
 ### Credentials, in detail
 
-**Bedrock** access uses **KeySmith** ([docs](https://keysmith.int.tubi.io/docs)),
-not an AWS profile. Create an API key on the *My Keys* page (the secret is shown
-only once). The daemon mints short-lived Bedrock bearer tokens on demand and
-resolves `bedrockModelName` to the inference-profile ARN your key may invoke.
+**Bedrock** access goes through a **Token Vending Machine (TVM)**, not an AWS
+profile: the daemon signs a request with your TVM key and receives a short-lived
+Bedrock bearer token plus the inference-profile ARNs it may invoke, resolving
+`bedrockModelName` to one of them. Point `BEDROCK_TVM_URL` at your organization's
+token vendor — `packages/server/src/bedrock-auth.ts` documents the wire protocol
+(a signed `POST /api/v1/tokens`) if you need to implement your own.
 
 **GitHub** access is a token (`GH_TOKEN`) — a PAT with `repo` scope, or the
 output of `gh auth token`. The same token authorizes raw `git push`/`clone`, not
@@ -71,9 +74,9 @@ just `gh api`.
 The wizard writes these to `./.env` (gitignored — treat as secret):
 
 ```
-GH_TOKEN=...            GITHUB_TOKEN=...
-KEYSMITH_URL=https://keysmith.int.tubi.io
-KEYSMITH_KEY_ID=01J...  KEYSMITH_SECRET=btv_...
+GH_TOKEN=...                GITHUB_TOKEN=...
+BEDROCK_TVM_URL=https://tvm.example.internal
+BEDROCK_TVM_KEY_ID=...      BEDROCK_TVM_SECRET=...
 ```
 
 Heavy state (SQLite `state.db`, repo clones, worktrees, CI logs) roots under
@@ -89,20 +92,20 @@ people touch. The full reference:
 | key | default | meaning |
 |-----|---------|---------|
 | `githubLogin` | — | your GitHub login; its own comments are skipped, and auto-fix commits are authored as this |
-| `allowRepos` | `["adRise/www"]` | if non-empty, only these repos are processed; blank = all authored PRs |
+| `allowRepos` | `[]` | if non-empty, only these repos are processed; blank = all authored PRs |
 | `dryRun` | `true` | **true** = no GitHub writes/pushes (verdicts + would-be actions only) |
 | `autoPushClasses` | `[]` | author classes (`ci`/`bot`/`human`) allowed to push without approval when the gate passes; `[]` parks every change at `awaiting_approval` (`risk:"high"` always parks) |
 | `pollIntervalMs` | `300000` | poll cadence (5 min) |
 | `port` | `4317` | dashboard/API port |
 | `ignoreRepos` | `[]` | repos to skip; `owner/repo` matches exactly, a bare name matches any owner |
-| `ignoreAuthors` | `["tubi-laborador", "github-actions"]` | authors whose feedback is dropped with no verdict (case-insensitive, tolerates `[bot]` suffix) |
+| `ignoreAuthors` | `["github-actions", "dependabot"]` | authors whose feedback is dropped with no verdict (case-insensitive, tolerates `[bot]` suffix) |
 | `botLogins` | (Copilot, codex, …) | extra bot logins beyond `user.type=="Bot"` and `*[bot]` |
 | `maxThreadAttempts` | `2` | auto-fixes per thread before escalating (loop guard) |
 | `maxGateFixAttempts` | `2` | times the fix agent re-runs to repair gate errors it introduced, per fix |
 | `maxProposalFiles` | `5` | max files a proposed change may touch before it's deemed too large and handed off as a manual plan |
 | `verdictMaxTurns` | `60` | agent turn budget for a review-comment verdict; raise it in large monorepos where locating the cited code takes more exploration |
 | `verdictCiMaxTurns` | `80` | same, for a CI-failure verdict (reading a large failing-check log needs more headroom) |
-| `bedrockModelName` | `claude-opus` | KeySmith model for the author/push path (verdict/gate/executor), resolved to an inference-profile ARN |
+| `bedrockModelName` | `claude-opus` | TVM model name for the author/push path (verdict/gate/executor), resolved to an inference-profile ARN |
 | `overview.enabled` | `true` | master switch for the PR overview + diagram feature |
 | `overview.maxTurns` | `150` | agent turn budget for the read-only PR investigation |
 | `overview.reviewerModelName` | `claude-sonnet` | faster model for read-only reviewer-facing artifacts (overview, risk analysis, quiz, Q&A) |
@@ -110,12 +113,15 @@ people touch. The full reference:
 | `explain.maxTurns` | `60` | agent turn budget for explaining ONE question; sized like `verdictMaxTurns` (a localized investigation), not `overview.maxTurns` |
 | `ci.enabledRepos` | `[]` | repos where CI babysitting is on (same matching as `ignoreRepos`); `[]` = off everywhere |
 | `ci.checkAllowlist` | (lint/typecheck/build/test) | which CI checks to babysit, and the gate class each maps to |
+| `repoSetup` | `{}` | per-repo host prep before `yarn install`, keyed like `ignoreRepos`. `{"owner/repo": {"npmScope": "@myorg", "npmRegistry": "https://npm.pkg.github.com/"}}` writes `~/.npmrc` auth so private scoped deps resolve |
 | `reposRoot` / `dbPath` / `worktreesRoot` / `ciLogsRoot` | under `BABYSIT_DATA_DIR` | on-disk state paths; auto-derived from the data dir, rarely overridden |
 
 ## Run at login
 
-`make start` from the quick start symlinks and loads
-`launchd/io.tubi.babysit-agent.plist` (`RunAtLoad` + `KeepAlive`), so the daemon
+`make start` from the quick start renders `launchd/babysit-agent.plist.template`
+(substituting this workspace's path and your `node`) into
+`~/Library/LaunchAgents/local.babysit-agent.plist` and loads it
+(`RunAtLoad` + `KeepAlive`), so the daemon
 comes up at login and respawns on crash. It runs `npm run dev:server` (tsx
 watch), so a backend source change is picked up on the next restart. The full
 target list:

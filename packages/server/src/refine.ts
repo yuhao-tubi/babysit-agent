@@ -5,13 +5,13 @@
  * types a rough reply/instruction plus an optional note ("make it firmer",
  * "shorter"), and we return a single rewritten string. No tools, no checkout, no
  * multi-turn loop — just one Bedrock `InvokeModel` call against the same
- * KeySmith-vended bearer token and inference-profile ARN the Agent SDK uses.
+ * TVM-vended bearer token and inference-profile ARN the Agent SDK uses.
  *
  * Kept separate from executor.ts (which orchestrates agent runs) on purpose:
  * this never touches GitHub or a worktree and never parks a Proposal — the
  * refined text is handed back to the box for the owner to edit and submit.
  */
-import { getBedrockSession } from "./keysmith.js";
+import { getBedrockSession } from "./bedrock-auth.js";
 
 const REFINE_SYSTEM =
   "You refine a PR author's draft text (a code-review reply or an instruction to an automated fixing agent). Apply the author's note and return ONLY the rewritten text — no preamble, no quotes, no commentary. Keep it concise and professional, preserve the author's intent and any technical specifics, and use Markdown where the original would. If the draft is empty, write a sensible draft from the note alone.";
