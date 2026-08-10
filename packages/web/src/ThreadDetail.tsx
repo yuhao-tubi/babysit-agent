@@ -25,6 +25,7 @@ import {
   GithubOutlined,
   CopyOutlined,
   BulbOutlined,
+  ClaudeFilled,
 } from "@ant-design/icons";
 import type { ThreadDetail } from "./types";
 import {
@@ -307,12 +308,12 @@ export function ThreadDetailView({
           {/* Also every status, for the same reason — and instant, since a Takeover
               is rendered from rows we already hold rather than generated. */}
           <Button
-            icon={<CopyOutlined />}
+            icon={<ClaudeFilled />}
             loading={copyingTakeover}
             onClick={copyTakeover}
             title="Copy this Thread as a Takeover — the feedback, the Verdict, any drafted change or reply, and the Explanation, rendered as one prompt for another coding agent. Copies only; nothing is pushed or posted."
           >
-            Copy Takeover
+            Copy Prompt
           </Button>
           {detail.status !== "resolved" && (
             <Button
