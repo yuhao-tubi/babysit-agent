@@ -39,6 +39,7 @@ import {
   resolveThread,
   refineInstruction,
   explainThread,
+  fetchTakeover,
 } from "./api";
 import { StatusTag } from "./status";
 import { Markdown } from "./Markdown";
@@ -98,6 +99,7 @@ export function ThreadDetailView({
   const [refining, setRefining] = useState(false);
   const [explainQuestion, setExplainQuestion] = useState("");
   const [explaining, setExplaining] = useState(false);
+  const [copyingTakeover, setCopyingTakeover] = useState(false);
 
   const load = useCallback(() => {
     fetchThread(id).then(setDetail).catch(() => setDetail(null));
@@ -164,6 +166,25 @@ export function ThreadDetailView({
       message.error(err?.message ?? "explain failed");
     } finally {
       setExplaining(false);
+    }
+  };
+
+  /**
+   * Copy this thread's Takeover — the server-rendered prompt for handing the
+   * thread to another coding agent. Fetched rather than assembled here: the
+   * markdown is built server-side so an agent hitting the URL gets the same bytes,
+   * and Proposal-kind/provenance vocabulary stays out of the dashboard.
+   */
+  const copyTakeover = async () => {
+    setCopyingTakeover(true);
+    try {
+      const md = await fetchTakeover(id);
+      await navigator.clipboard.writeText(md);
+      message.success("Takeover copied — paste it into Claude Code");
+    } catch (err: any) {
+      message.error(err?.message ?? "couldn't copy the thread");
+    } finally {
+      setCopyingTakeover(false);
     }
   };
 
@@ -282,6 +303,16 @@ export function ThreadDetailView({
             title="Explain this thread's question — a grounded, read-only walkthrough with diagrams. Never posted to GitHub."
           >
             {detail.explanationMd ? "Re-explain" : "Explain"}
+          </Button>
+          {/* Also every status, for the same reason — and instant, since a Takeover
+              is rendered from rows we already hold rather than generated. */}
+          <Button
+            icon={<CopyOutlined />}
+            loading={copyingTakeover}
+            onClick={copyTakeover}
+            title="Copy this Thread as a Takeover — the feedback, the Verdict, any drafted change or reply, and the Explanation, rendered as one prompt for another coding agent. Copies only; nothing is pushed or posted."
+          >
+            Copy Takeover
           </Button>
           {detail.status !== "resolved" && (
             <Button

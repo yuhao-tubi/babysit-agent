@@ -149,6 +149,10 @@ npm run -w @babysit/server list-prs            # list authored open PRs
 npm run -w @babysit/server poll-once           # one cycle: upsert threads (sqlite only)
 npx tsx packages/server/src/cli.ts threads     # dump threads
 npx tsx packages/server/src/cli.ts verdict <id> # run verdict on one thread (no GitHub writes)
+
+# a Thread as a copy-paste prompt for another coding agent (the dashboard's
+# "Copy for Claude Code" button fetches this same markdown)
+curl -s localhost:4317/api/threads/<id>/takeover
 ```
 
 ## Safety / rollout

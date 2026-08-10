@@ -101,6 +101,19 @@ export async function explainThread(id: number, question?: string): Promise<void
   }
 }
 
+/**
+ * Fetch this Thread's Takeover — the whole thread rendered server-side as a
+ * copy-paste prompt for another coding agent. Plain markdown, not JSON.
+ */
+export async function fetchTakeover(id: number): Promise<string> {
+  const r = await fetch(`/api/threads/${id}/takeover`);
+  if (!r.ok) {
+    const body = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `could not build the takeover (${r.status})`);
+  }
+  return r.text();
+}
+
 export async function triggerPoll(): Promise<void> {
   await fetch("/api/poll", { method: "POST" });
 }

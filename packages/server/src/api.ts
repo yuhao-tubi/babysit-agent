@@ -20,6 +20,7 @@ import { requestOverview, requestQuestion } from "./overview.js";
 import { requestQuiz } from "./quiz.js";
 import { requestBlindSpots, blindSpotsStale } from "./risks.js";
 import { requestExplanation } from "./explain.js";
+import { takeoverForThread } from "./takeover.js";
 import { isIgnoredRepo } from "./classify.js";
 import {
   applyInstruction,
@@ -286,6 +287,19 @@ export async function startServer(port: number): Promise<void> {
     const view = threadView(Number(req.params.id));
     if (!view) return reply.code(404).send({ error: "not found" });
     return view;
+  });
+
+  // A Thread's **Takeover** (see CONTEXT.md): the whole thread rendered as a
+  // copy-paste prompt for another coding agent. Served as `text/plain` so both the
+  // dashboard's Copy button and an agent fetching the URL directly get the same
+  // bytes. GET, because it is a pure projection of rows we already have — nothing
+  // is generated, stored, or mutated, so it is safe on any Thread in any status and
+  // `dryRun` does not apply. It exposes nothing `GET /api/threads/:id` doesn't
+  // already return as JSON.
+  app.get<{ Params: { id: string } }>("/api/threads/:id/takeover", async (req, reply) => {
+    const md = takeoverForThread(Number(req.params.id));
+    if (md === null) return reply.code(404).send({ error: "not found" });
+    return reply.type("text/plain; charset=utf-8").send(md);
   });
 
   app.post<{ Params: { id: string }; Body: { instruction: string } }>(
