@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  ConfigProvider,
   Dropdown,
   Input,
   Modal,
@@ -49,6 +50,9 @@ import { DiffView } from "./DiffView";
 import { prUrl, VscodeLink } from "./prLinks";
 
 const { Title, Text, Paragraph } = Typography;
+
+/** Claude's brand coral — the Copy Prompt button's primary colour. */
+const CLAUDE_CORAL = "#D97757";
 
 /** Four-pointed concave "AI sparkle" glyph, sized to the current font. */
 function SparkIcon({ style }: { style?: React.CSSProperties }) {
@@ -307,14 +311,20 @@ export function ThreadDetailView({
           </Button>
           {/* Also every status, for the same reason — and instant, since a Takeover
               is rendered from rows we already hold rather than generated. */}
-          <Button
-            icon={<ClaudeFilled />}
-            loading={copyingTakeover}
-            onClick={copyTakeover}
-            title="Copy this Thread as a Takeover — the feedback, the Verdict, any drafted change or reply, and the Explanation, rendered as one prompt for another coding agent. Copies only; nothing is pushed or posted."
-          >
-            Copy Prompt
-          </Button>
+          {/* Claude's own coral rather than the app's blue `colorPrimary`: the
+              button hands work to Claude Code, so the brand mark and colour read as
+              one affordance. Scoped to this button — the global token stays blue. */}
+          <ConfigProvider theme={{ token: { colorPrimary: CLAUDE_CORAL } }}>
+            <Button
+              type="primary"
+              icon={<ClaudeFilled />}
+              loading={copyingTakeover}
+              onClick={copyTakeover}
+              title="Copy this Thread as a Takeover — the feedback, the Verdict, any drafted change or reply, and the Explanation, rendered as one prompt for another coding agent. Copies only; nothing is pushed or posted."
+            >
+              Copy Prompt
+            </Button>
+          </ConfigProvider>
           {detail.status !== "resolved" && (
             <Button
               icon={<CheckCircleOutlined />}
