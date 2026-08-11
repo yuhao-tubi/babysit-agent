@@ -301,7 +301,7 @@ export function ThreadDetailView({
           {detail.status !== "resolved" && (
             <Button
               color="green"
-              variant="solid"
+              variant="outlined"
               icon={<CheckCircleOutlined />}
               loading={resolving}
               onClick={resolve}
