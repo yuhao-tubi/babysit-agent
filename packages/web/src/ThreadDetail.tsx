@@ -298,35 +298,10 @@ export function ThreadDetailView({
           </Space>
         </div>
         <Space>
-          {/* Available in EVERY status: a question is worth answering whether the
-              thread is blocked, awaiting approval, or already resolved. Read-only
-              — it posts nothing to GitHub. */}
-          <Button
-            icon={<BulbOutlined />}
-            loading={explaining || detail.explanationStatus === "generating"}
-            onClick={() => explain()}
-            title="Explain this thread's question — a grounded, read-only walkthrough with diagrams. Never posted to GitHub."
-          >
-            {detail.explanationMd ? "Re-explain" : "Explain"}
-          </Button>
-          {/* Also every status, for the same reason — and instant, since a Takeover
-              is rendered from rows we already hold rather than generated. */}
-          {/* Claude's own coral rather than the app's blue `colorPrimary`: the
-              button hands work to Claude Code, so the brand mark and colour read as
-              one affordance. Scoped to this button — the global token stays blue. */}
-          <ConfigProvider theme={{ token: { colorPrimary: CLAUDE_CORAL } }}>
-            <Button
-              type="primary"
-              icon={<ClaudeFilled />}
-              loading={copyingTakeover}
-              onClick={copyTakeover}
-              title="Copy this Thread as a Takeover — the feedback, the Verdict, any drafted change or reply, and the Explanation, rendered as one prompt for another coding agent. Copies only; nothing is pushed or posted."
-            >
-              Copy Prompt
-            </Button>
-          </ConfigProvider>
           {detail.status !== "resolved" && (
             <Button
+              color="green"
+              variant="solid"
               icon={<CheckCircleOutlined />}
               loading={resolving}
               onClick={resolve}
@@ -335,6 +310,32 @@ export function ThreadDetailView({
               Mark resolved
             </Button>
           )}
+          {/* Available in EVERY status — and instant, since a Takeover is rendered
+              from rows we already hold rather than generated. Tinted with Claude's
+              own coral (not the app's blue `colorPrimary`, which stays reserved for
+              the write path) so the brand mark and colour read as one affordance. */}
+          <ConfigProvider theme={{ token: { colorPrimary: CLAUDE_CORAL } }}>
+            <Button
+              icon={<ClaudeFilled />}
+              loading={copyingTakeover}
+              onClick={copyTakeover}
+              title="Copy this Thread as a Takeover — the feedback, the Verdict, any drafted change or reply, and the Explanation, rendered as one prompt for another coding agent. Copies only; nothing is pushed or posted."
+              style={{ color: CLAUDE_CORAL, borderColor: CLAUDE_CORAL }}
+            >
+              Copy Prompt
+            </Button>
+          </ConfigProvider>
+          {/* Also every status: a question is worth answering whether the thread is
+              blocked, awaiting approval, or already resolved. Read-only — it posts
+              nothing to GitHub. */}
+          <Button
+            icon={<BulbOutlined />}
+            loading={explaining || detail.explanationStatus === "generating"}
+            onClick={() => explain()}
+            title="Explain this thread's question — a grounded, read-only walkthrough with diagrams. Never posted to GitHub."
+          >
+            {detail.explanationMd ? "Re-explain" : "Explain"}
+          </Button>
           <Dropdown.Button
             loading={retrying || rerunning}
             onClick={retry}
