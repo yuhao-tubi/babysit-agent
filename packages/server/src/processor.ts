@@ -19,7 +19,9 @@ import {
   dismissReplyProposal,
   execute,
   postReply,
+  parkAlreadyNotified,
   postReplyProposal,
+  type StaleProposal,
 } from "./executor.js";
 import { notifyEscalation } from "./notify.js";
 import { onEvent, emit } from "./events.js";
@@ -181,18 +183,68 @@ export async function approveThread(id: number): Promise<void> {
   updateThread(id, { status: "in_progress", error: null });
   logEvent(id, "approve", "owner approved the proposal");
   emit({ type: "thread_updated", threadId: id });
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
+  await applyFrozenProposal(id, s.owner, s.repo);
+}
+
+/**
+ * Apply a Thread's frozen proposal on the repo queue and settle it — the shared body
+ * of Approve and Retry (and so of restart recovery, which re-drives Retry).
+ *
+ * When Approve finds the frozen diff conflicting with upstream, `approveProposal`
+ * hands back a rebuild instruction instead of a status. We run it as an ordinary
+ * instruction re-propose, but only AFTER the queue job returns: `SerialQueue` is not
+ * re-entrant and the rebuild needs the queue for its own worktree, so re-entering
+ * here would deadlock. The rebuilt proposal parks at `awaiting_approval` and is
+ * never pushed — the diff is different bytes than the owner reviewed, so it takes a
+ * second Approve. That park is the only banner for the whole stale→rebuild trip: the
+ * conflict itself is silent, and a rebuild that fails notifies from its own path.
+ *
+ * Routing the rebuild through `applyInstruction` does NOT replay the stored Verdict
+ * decision (the thing restart recovery is forbidden from doing): a freeform
+ * instruction forces `action = "propose"` in `execute`, ahead of every verb branch,
+ * so a Thread whose verdict was `escalate`/`reply`/`amend_pr_body` cannot re-run that
+ * action here. Only the verdict's non-deciding fields (its summary, its `risk`) are
+ * still read.
+ */
+async function applyFrozenProposal(id: number, owner: string, repo: string): Promise<void> {
+  // A box, not a plain `let`: the assignment happens inside the queued closure, which
+  // control-flow analysis can't see.
+  const box: { stale: StaleProposal | null } = { stale: null };
+  await queue.run(`${owner}/${repo}`, async () => {
     const fresh = getThread(id);
     if (!fresh || !fresh.proposalJson) return;
     try {
-      const status = await approveProposal(fresh);
-      finalize(id, status);
+      const outcome = await approveProposal(fresh);
+      // Stale: not an ending. Leave the Thread `in_progress` (no `blocked` flash, no
+      // `finalized` event) — the rebuild below carries it to its real resting state.
+      if (typeof outcome === "object" && "stale" in outcome) {
+        box.stale = outcome;
+        return;
+      }
+      finalize(id, outcome);
     } catch (err: any) {
       logEvent(id, "error", err?.message ?? String(err));
       updateThread(id, { status: "error", error: err?.message ?? String(err) });
       emit({ type: "thread_updated", threadId: id });
     }
   });
+  if (!box.stale) return;
+  // Same catch shape as every other action body here: a throw must land the Thread
+  // on `error`, not strand it `in_progress` and reject into the HTTP caller.
+  try {
+    await applyInstruction(id, box.stale.instruction);
+    const after = getThread(id);
+    // One banner for the whole trip: skip ours when parking the rebuilt proposal
+    // already raised one (inconclusive gate / high risk) — those also send the owner
+    // to the card, and two banners for one click is noise.
+    if (after?.status === "awaiting_approval" && !parkAlreadyNotified(after)) {
+      notifyEscalation(id, after.prKey, "upstream changed those lines; rebuilt the fix — approve again");
+    }
+  } catch (err: any) {
+    logEvent(id, "error", err?.message ?? String(err));
+    updateThread(id, { status: "error", error: err?.message ?? String(err) });
+    emit({ type: "thread_updated", threadId: id });
+  }
 }
 
 /**
@@ -329,18 +381,7 @@ export async function retryThread(id: number): Promise<void> {
   updateThread(id, { status: "in_progress", error: null });
   logEvent(id, "retry", "re-applying frozen proposal");
   emit({ type: "thread_updated", threadId: id });
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
-    const fresh = getThread(id);
-    if (!fresh || !fresh.proposalJson) return;
-    try {
-      const status = await approveProposal(fresh);
-      finalize(id, status);
-    } catch (err: any) {
-      logEvent(id, "error", err?.message ?? String(err));
-      updateThread(id, { status: "error", error: err?.message ?? String(err) });
-      emit({ type: "thread_updated", threadId: id });
-    }
-  });
+  await applyFrozenProposal(id, s.owner, s.repo);
 }
 
 /**

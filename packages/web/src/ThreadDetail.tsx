@@ -477,7 +477,7 @@ export function ThreadDetailView({
         >
           <Paragraph type="secondary" style={{ fontSize: 12 }}>
             {detail.proposal.kind === "code"
-              ? "Not pushed yet. Review the diff, then “Approve & push code” re-checks it against the latest branch HEAD, re-runs the gate, and pushes these exact changes. The reply below is approved separately. Or send a freeform instruction to revise the proposal — it will re-propose for you to review again."
+              ? "Not pushed yet. Review the diff, then “Approve & push code” re-checks it against the latest branch HEAD, re-runs the gate, and pushes these exact changes. If upstream has since edited the same lines, nothing is pushed — the fix is rebuilt on the new code and parked here for a second approval. The reply below is approved separately. Or send a freeform instruction to revise the proposal — it will re-propose for you to review again."
               : detail.proposal.kind === "manual_plan"
                 ? "This change was too large to apply automatically (the fix agent ran out of turns). Copy the brief below, open this PR's branch in Claude Code, and paste it to finish the change by hand. The daemon will not push this."
                 : "Not applied yet. Review the change, then “Approve & update description” updates the PR description. The reply below is approved separately. Or send a freeform instruction to revise it."}

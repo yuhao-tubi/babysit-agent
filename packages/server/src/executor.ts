@@ -75,6 +75,84 @@ function settleProposal(s: ThreadRow, p: Proposal): ThreadRow["status"] {
   return anyApproved || bothSettled ? "resolved" : "awaiting_approval";
 }
 
+/**
+ * Carry a prior Proposal's settled REPLY progress onto the Proposal that replaces
+ * it. Re-proposing builds a fresh Proposal from scratch, so without this the reply
+ * part silently regresses to "pending": a reply already sitting on GitHub would be
+ * offered for posting a second time (a duplicate comment on the reviewer's thread),
+ * and one the owner deliberately dismissed would come back.
+ *
+ * Only the SETTLED reply flags carry. `changeApplied` deliberately does not: the
+ * rebuilt change is different bytes that have never been pushed, and inheriting
+ * "applied" would hide it from Approve entirely. When the prior reply was posted we
+ * also keep its text, so the card shows what actually went to GitHub rather than a
+ * newer draft nobody sent.
+ */
+export function carryReplyProgress(prior: Proposal | null, next: Proposal): Proposal {
+  if (!prior) return next;
+  const out = { ...next };
+  if (prior.replyPosted) {
+    out.replyPosted = true;
+    if (prior.replyDraft?.trim()) out.replyDraft = prior.replyDraft;
+  }
+  if (prior.replyDismissed) out.replyDismissed = true;
+  return out;
+}
+
+/**
+ * Returned by `approveProposal` instead of a status when the frozen diff conflicted
+ * with upstream: the Thread is NOT finished (it stays `in_progress`) and the caller
+ * must drive the rebuild with `instruction`.
+ */
+export type StaleProposal = { stale: true; instruction: string };
+
+/**
+ * True if parking this Thread's proposal already raised a banner of its own — an
+ * inconclusive gate, or a high-risk change (see the tail of `proposeCode`). The
+ * stale-rebuild path checks this so the round trip stays at ONE banner instead of
+ * stacking "approve again" on top of a warning that already says to go look.
+ */
+export function parkAlreadyNotified(s: ThreadRow): boolean {
+  const proposal: Proposal | null = s.proposalJson ? JSON.parse(s.proposalJson) : null;
+  if (!proposal) return false;
+  if (proposal.gateInconclusive) return true;
+  const verdict: Verdict | null = s.verdictJson ? JSON.parse(s.verdictJson) : null;
+  return verdict?.risk === "high";
+}
+
+/** How much of the stale diff to quote back to the fix agent. */
+const STALE_DIFF_CHARS = 4000;
+
+/**
+ * The instruction that drives an automatic re-propose after Approve found the
+ * frozen diff conflicting with upstream (see `approveProposal`). It quotes the diff
+ * that no longer applies so the agent re-applies the same INTENT on today's code
+ * instead of re-deciding from nothing — and explicitly licenses the other outcome,
+ * making no change at all, because upstream touching those exact lines often means
+ * the feedback was already addressed there. An empty rebuild then lands the Thread
+ * at `blocked` for the owner to close, which we prefer to guessing.
+ */
+export function buildStaleRebuildInstruction(o: {
+  baseSha: string;
+  remoteSha: string;
+  diff: string;
+}): string {
+  const quoted =
+    o.diff.length > STALE_DIFF_CHARS
+      ? `${o.diff.slice(0, STALE_DIFF_CHARS)}\n… (diff truncated)`
+      : o.diff;
+  return [
+    `The branch advanced ${o.baseSha.slice(0, 7)} -> ${o.remoteSha.slice(0, 7)} and upstream edited the same lines the proposed fix changed, so it no longer applies. Re-apply the SAME intent on the current code.`,
+    "",
+    "The fix that no longer applies:",
+    "```diff",
+    quoted,
+    "```",
+    "",
+    "If upstream has already addressed the feedback, make no change at all and say so — do not invent a different fix.",
+  ].join("\n");
+}
+
 export async function postReply(
   s: ThreadRow,
   items: FeedbackItem[],
@@ -328,13 +406,22 @@ async function proposeCode(
     // Gate passed cleanly. Either auto-push (scoped classes) or freeze + park.
     // An inconclusive gate never auto-pushes — it always waits for the owner's
     // informed Approve, even for autoPushClasses (mayAutoPush vetoes it).
-    if (!gateInconclusive && mayAutoPush(s, verdict)) {
+    // `!instruction`: an instruction-driven run ALWAYS re-proposes and never pushes
+    // (CONTEXT.md, "Instruction") — the owner asked for a revision, so the revised
+    // bytes are unread and must be approved. This is load-bearing for the automatic
+    // stale rebuild, which arrives here as a synthesized instruction: its whole point
+    // is that the diff the owner approved no longer exists.
+    if (!gateInconclusive && !instruction && mayAutoPush(s, verdict)) {
       return await pushVerifiedDiff(s, verdict, items, head.headRefName, baseSha, dir, diff, fixSummary, isCi);
     }
 
     // Park: freeze the diff for the owner to Approve. Writes nothing to GitHub,
     // so dryRun is irrelevant here — the push happens only on Approve.
-    const proposal: Proposal = {
+    // A re-propose REPLACES whatever proposal was parked here, so any reply part
+    // the owner already settled must survive the swap — otherwise a reply already
+    // on GitHub is offered for posting again.
+    const prior: Proposal | null = s.proposalJson ? JSON.parse(s.proposalJson) : null;
+    const proposal: Proposal = carryReplyProgress(prior, {
       kind: "code",
       planMarkdown: verdict.summary || fixSummary || "Proposed code change.",
       baseSha,
@@ -342,7 +429,7 @@ async function proposeCode(
       gateInconclusive: gateInconclusive || undefined,
       diff,
       replyDraft: verdict.reply_draft || fixSummary || "",
-    };
+    });
     updateThread(s.id, { proposal, diff: null });
     logEvent(
       s.id,
@@ -423,8 +510,14 @@ async function pushVerifiedDiff(
  * just posts the reply. After applying, the Thread resolves only if no reply part
  * is still pending; otherwise it stays at `awaiting_approval` for the reply.
  * Any safety check failing moves the thread to `blocked`. Honors dryRun.
+ *
+ * One outcome is not a status: when upstream edited the same lines the frozen diff
+ * changes, this returns a `StaleProposal` asking the CALLER to re-propose. It can't
+ * do that itself — a re-propose runs a fix agent through the repo queue, and this
+ * already runs inside a queue job (`SerialQueue` is not re-entrant, so re-entering
+ * would deadlock).
  */
-export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]> {
+export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"] | StaleProposal> {
   const cfg = loadConfig();
   if (!s.proposalJson) {
     logEvent(s.id, "approve_noop", "no proposal to approve");
@@ -485,18 +578,32 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     // edit. `landed.diff` is what will actually be pushed — from here on, use it
     // instead of `proposal.diff` for the gate, the stored diff, and the log.
     const landed = await applyPatchRebasing(dir, proposal.diff);
-    if (landed.mode === "conflict" || landed.mode === "invalid") {
+    if (landed.mode === "conflict") {
+      // Don't dead-end on `blocked` waiting for the owner to hand-type "redo it":
+      // signal the caller to run that re-propose itself. No banner here — the one
+      // banner comes when the rebuilt proposal is ready (or when the rebuild fails,
+      // from its own failure path). The stale diff is logged before it is
+      // overwritten so the timeline keeps what was reviewed.
+      logEvent(s.id, "approve_stale", `branch advanced ${proposal.baseSha.slice(0, 7)}->${remoteSha.slice(0, 7)}; upstream edited the same lines this proposal changes`);
+      logEvent(s.id, "auto_repropose", `rebuilding the fix on ${remoteSha.slice(0, 7)}; the proposal that no longer applies:\n${proposal.diff.slice(0, 1000)}`);
+      emit({ type: "thread_updated", threadId: s.id });
+      return {
+        stale: true,
+        instruction: buildStaleRebuildInstruction({
+          baseSha: proposal.baseSha,
+          remoteSha,
+          diff: proposal.diff,
+        }),
+      };
+    }
+    if (landed.mode === "invalid") {
+      // Nothing landed even with a 3-way merge: a malformed frozen diff, or the
+      // pre-image blob is missing so no merge was possible. Distinct from a conflict
+      // so it isn't misdiagnosed as upstream drift — and NOT auto-rebuilt, because
+      // the cause is our own artifact, not the branch moving.
       const moved = remoteSha !== proposal.baseSha;
-      if (landed.mode === "conflict") {
-        logEvent(s.id, "approve_stale", `branch advanced ${proposal.baseSha.slice(0, 7)}->${remoteSha.slice(0, 7)}; upstream edited the same lines this proposal changes`);
-        notifyEscalation(s.id, s.prKey, "the lines you reviewed were modified upstream; send an instruction to re-propose");
-      } else {
-        // Nothing landed even with a 3-way merge: a malformed frozen diff, or the
-        // pre-image blob is missing so no merge was possible. Distinct from a
-        // conflict so it isn't misdiagnosed as upstream drift.
-        logEvent(s.id, "approve_patch_invalid", `frozen diff could not be applied at ${remoteSha.slice(0, 7)}${moved ? ` (branch advanced from ${proposal.baseSha.slice(0, 7)})` : " (unchanged HEAD)"}; re-propose to rebuild it`);
-        notifyEscalation(s.id, s.prKey, "the saved proposal could not be applied; send an instruction to re-propose");
-      }
+      logEvent(s.id, "approve_patch_invalid", `frozen diff could not be applied at ${remoteSha.slice(0, 7)}${moved ? ` (branch advanced from ${proposal.baseSha.slice(0, 7)})` : " (unchanged HEAD)"}; re-propose to rebuild it`);
+      notifyEscalation(s.id, s.prKey, "the saved proposal could not be applied; send an instruction to re-propose");
       return "blocked";
     }
 

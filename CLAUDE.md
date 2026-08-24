@@ -80,6 +80,13 @@ documented keys.
     verbatim post is the **Reply on GitHub** button only. The instruction box's
     **AI refine** helper is a one-shot direct Claude rewrite (`refine.ts`, Bedrock
     `InvokeModel`) — not an agent run, touches nothing, just returns text.
+  - **A stale Proposal is rebuilt, not dead-ended.** Approve's apply-check
+    re-seats the frozen diff with a 3-way merge on mere context drift; on a
+    same-line conflict with upstream it **auto-re-proposes** (fix agent re-run on
+    the new HEAD, shown the diff that no longer applies) and parks the result for
+    a second Approve — it never pushes bytes the owner didn't read. An invalid
+    diff still blocks. `SerialQueue` is not re-entrant, so the rebuild is driven
+    by `approveProposal`'s caller, not inline.
   - `risk:"high"` keeps the Proposal (so the owner reviews the exact diff) but
     **vetoes auto-push** — it always waits for Approve, even for `autoPushClasses`.
   - Fast-forward-only push (abort if the branch moved); serial per-repo queue;
