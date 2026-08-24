@@ -89,7 +89,107 @@ export async function ensureBase(owner: string, repo: string): Promise<string> {
   // otherwise provisionDeps' `yarn install` 401s on private packages.
   await runRepoSetup({ owner, repo, dir });
   await provisionDeps(dir);
+  await provisionPackageBuilds(dir);
   return dir;
+}
+
+/** Sha the base clone's workspace-package `lib/` outputs were last built from. */
+function buildStampPath(dir: string): string {
+  return join(dir, ".git", "babysit-package-build-sha");
+}
+
+/**
+ * Keep the base clone's workspace-package build outputs (`packages/<pkg>/lib`) in sync
+ * with base-branch HEAD. These are what `seedBuildArtifacts` CoW-copies into every
+ * worktree and what the light gate typechecks the app against — so if they lag,
+ * EVERY thread's gate reports the app's use of a since-added export as an error in
+ * files no fix touched, and every proposal parks `gate_inconclusive`. Nothing else
+ * refreshes them: `provisionDeps` only installs `node_modules`, and the gate's
+ * builds run inside the throwaway worktree, never in base. Left alone, the base's
+ * `lib/` stays frozen at whenever it was first built while master moves on for
+ * weeks.
+ *
+ * Guarded by a sha stamp so the cost is paid only when it's needed: rebuild just
+ * the packages whose sources changed between the stamp and current HEAD (scoped
+ * `lerna run build`), not the whole `pre-build` fan-out. With no stamp (first run
+ * on this clone) there's no delta to compute, so build every package once and
+ * stamp — every later poll is then incremental. The stamp lives under `.git/`,
+ * which `git worktree add` does not copy, so worktrees never inherit it.
+ *
+ * Best-effort: a build failure leaves the stamp unmoved (so the next poll retries)
+ * and never blocks the worktree — the gate still runs, just against older
+ * declarations, which is exactly today's behavior.
+ */
+async function provisionPackageBuilds(dir: string): Promise<void> {
+  if (!existsSync(join(dir, "packages"))) return; // not a workspace monorepo
+  const lerna = existsSync(join(dir, "lerna.json"));
+  if (!lerna) return;
+
+  const head = await git(dir, ["rev-parse", "HEAD"]);
+  const stamp = buildStampPath(dir);
+  const had = existsSync(stamp) ? readFileSync(stamp, "utf8").trim() : null;
+  if (had === head) return; // already built at this sha
+
+  let scopes: string[] | null = null; // null => build everything
+  if (had) {
+    // Only the packages whose sources moved since the last build need redoing.
+    let changed: string[] = [];
+    try {
+      changed = (await git(dir, ["diff", "--name-only", "-z", `${had}..${head}`]))
+        .split("\0")
+        .filter(Boolean);
+    } catch {
+      // Stamped sha is gone (history rewrite / gc) — fall back to a full build.
+      changed = [];
+    }
+    const dirs = new Set<string>();
+    for (const f of changed) {
+      const m = /^packages\/([^/]+)\//.exec(f);
+      if (m) dirs.add(m[1]);
+    }
+    if (dirs.size) {
+      scopes = [];
+      for (const d of dirs) {
+        const name = packageName(join(dir, "packages", d));
+        if (name) scopes.push(name);
+      }
+      if (!scopes.length) {
+        // Touched packages have no buildable name — nothing to do, but the tree IS
+        // current, so stamp it so we don't recompute this delta every poll.
+        writeFileSync(stamp, head);
+        return;
+      }
+    } else if (changed.length) {
+      // Commits landed, but none in packages/ — outputs are still valid. Stamp.
+      writeFileSync(stamp, head);
+      return;
+    }
+  }
+
+  const args = ["lerna", "run", "build"];
+  for (const s of scopes ?? []) args.push("--scope", s);
+  try {
+    await exec("yarn", args, {
+      cwd: dir,
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 30 * 60 * 1000,
+    });
+    writeFileSync(stamp, head);
+  } catch {
+    /* best-effort: leave the stamp so the next poll retries */
+  }
+}
+
+/** A workspace package's declared name, or null if it has no `build` script. */
+function packageName(pkgDir: string): string | null {
+  const p = join(pkgDir, "package.json");
+  if (!existsSync(p)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(p, "utf8"));
+    return pkg?.name && pkg?.scripts?.build ? pkg.name : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Hash the dependency lockfile so we only re-install when it actually changes. */
@@ -428,10 +528,88 @@ export async function remoteHeadSha(dir: string, headRef: string): Promise<strin
   return git(dir, ["rev-parse", `origin/${headRef}`]);
 }
 
+/**
+ * Repo-relative paths the PR BRANCH changed relative to the base branch — i.e.
+ * the PR's own diff, not the fix agent's.
+ *
+ * Needed because a worktree's build artifacts are seeded from the base clone,
+ * which is parked on `master` (see seedBuildArtifacts): every workspace package
+ * the PR itself modified has a STALE `lib/*.d.ts` in the worktree. The light gate
+ * typechecks the app against those declarations, so a PR that (say) widens a
+ * union type in `packages/foo/src` produces a flood of errors about its OWN new
+ * symbols in files the fix never touched — the gate then can't pass cleanly and
+ * the proposal parks as `gate_inconclusive`. Feeding these paths to the gate lets
+ * it rebuild exactly those packages first.
+ *
+ * Three-dot (merge-base) diff so commits landed on master after the PR branched
+ * don't show up as the PR's changes. Best-effort: returns [] when the base ref
+ * can't be resolved, which just leaves the gate with the fix diff alone (today's
+ * behavior).
+ */
+export async function branchChangedFiles(dir: string): Promise<string[]> {
+  try {
+    const out = await git(dir, [
+      "diff",
+      "--name-only",
+      "-z",
+      `origin/${BASE_BRANCH}...HEAD`,
+    ]);
+    return out.split("\0").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Untracked paths that exist in a worktree but are NEVER part of a proposal: our
+ * own scratch patch and the artifacts the read-only agents write into their
+ * checkouts (explain → `explanation.md`, overview/risks/quiz → `overview/`).
+ * Without this they'd be picked up as new files, land in the frozen diff, and get
+ * pushed. Gitignored paths (`node_modules`, build output) need no entry here —
+ * `git ls-files -o --exclude-standard` already omits them.
+ */
+const DIFF_EXCLUDE = (path: string): boolean =>
+  path === ".babysit-proposal.patch" ||
+  path === "explanation.md" ||
+  path.startsWith("overview/");
+
+/**
+ * The worktree's full working-tree change against HEAD — including files the fix
+ * agent CREATED.
+ *
+ * `git diff HEAD` alone only reports paths git already tracks, so a brand-new file
+ * was silently missing from the Proposal: the owner reviewed and approved an
+ * incomplete diff, and because the frozen patch is what gets re-applied at Approve
+ * time, the new file never reached the branch either. Fix: register the untracked
+ * paths with `git add -N` (`--intent-to-add`) — an index entry with no staged
+ * content, which is exactly enough for `git diff HEAD` to emit them as `new file
+ * mode` hunks.
+ *
+ * The untracked set is enumerated explicitly (`ls-files -o`) and filtered, rather
+ * than using `add -AN` with `:(exclude)` pathspecs: `git add` FAILS (exit 1, "paths
+ * are ignored by one of your .gitignore files") when a pathspec names a gitignored
+ * path, so excluding `node_modules` that way breaks on every real repo. Listing
+ * untracked files is ignore-aware for free.
+ *
+ * `--binary` so a created non-text file (an image, a fixture) produces an appliable
+ * patch instead of the informational "Binary files differ" line, which `git apply`
+ * rejects.
+ *
+ * Note this makes those files removable by a later `git reset --hard` — they're
+ * index entries now, not untracked. That's what we want on every caller's failure
+ * path: abandoning a patch should leave no stray files behind.
+ */
 export async function gitDiff(dir: string): Promise<string> {
+  const untracked = (await git(dir, ["ls-files", "-o", "--exclude-standard", "-z"]))
+    .split("\0")
+    .filter((p) => p && !DIFF_EXCLUDE(p));
+  // Intent-to-add is index-only: nothing on disk changes, and the throwaway
+  // worktree's index is never used for anything but this diff and the final
+  // `add -A` + commit. `--` guards paths that look like options.
+  if (untracked.length) await git(dir, ["add", "-N", "--", ...untracked]);
   // VERBATIM (see gitRaw): trimming would drop a trailing blank context line and
   // corrupt the patch at apply time.
-  return gitRaw(dir, ["diff", "HEAD"]);
+  return gitRaw(dir, ["diff", "HEAD", "--binary"]);
 }
 
 /**

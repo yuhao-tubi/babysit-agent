@@ -192,3 +192,95 @@ test("pre-image blob absent (no 3-way possible) → invalid, never a silent no-o
   const landed = await applyPatchRebasing(r.dir, frozen);
   assert.equal(landed.mode, "invalid");
 });
+
+// ---- gitDiff: a CREATED file must reach the Proposal (thread 343) ----
+//
+// `git diff HEAD` only reports tracked paths, so a file the fix agent created was
+// missing from the frozen diff entirely: the owner reviewed an incomplete change,
+// and since the frozen patch is what Approve re-applies, the new file never
+// reached the branch either.
+
+const { gitDiff } = await import("./worktrees.js");
+
+const write = (dir: string, rel: string, body: string | Buffer) => {
+  mkdirSync(join(dir, rel, ".."), { recursive: true });
+  writeFileSync(join(dir, rel), body as any);
+};
+
+test("a created file appears in the diff as a new-file hunk", async () => {
+  const r = repo(BASE);
+  write(r.dir, "added.ts", "export const n = 1;\n");
+  writeFileSync(join(r.dir, "f.ts"), BASE.replace("target;", "target(1);"));
+
+  const diff = await gitDiff(r.dir);
+  assert.match(diff, /^diff --git a\/added\.ts b\/added\.ts$/m);
+  assert.match(diff, /^new file mode/m);
+  assert.match(diff, /^\+export const n = 1;$/m, "the new file's content must be in the patch");
+  assert.match(diff, /target\(1\);/, "the tracked-file edit must still be there");
+});
+
+test("a created file in a NEW nested directory is included", async () => {
+  const r = repo(BASE);
+  write(r.dir, "src/deep/nested.ts", "export const d = 1;\n");
+  assert.match(await gitDiff(r.dir), /^diff --git a\/src\/deep\/nested\.ts/m);
+});
+
+test("a created file survives the freeze → Approve round trip", async () => {
+  const r = repo(BASE);
+  write(r.dir, "added.ts", "export const n = 1;\n");
+  const frozen = await gitDiff(r.dir);
+  execFileSync("git", ["reset", "--hard"], { cwd: r.dir });
+  // reset --hard removes it: intent-to-add made it an index entry, not untracked.
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: r.dir, encoding: "utf8" }).trim(), "");
+
+  const landed = await applyPatchRebasing(r.dir, frozen);
+  assert.equal(landed.mode, "exact");
+  assert.equal(readFileSync(join(r.dir, "added.ts"), "utf8"), "export const n = 1;\n");
+});
+
+test("a created BINARY file is encoded so the patch still applies", async () => {
+  const r = repo(BASE);
+  // "Binary files differ" (the default, informational form) makes `git apply` fail
+  // with "cannot apply binary patch ... without full index line" — hence --binary.
+  write(r.dir, "fixture.bin", Buffer.from([0, 1, 2, 255, 0, 7]));
+  const frozen = await gitDiff(r.dir);
+  assert.match(frozen, /GIT binary patch/);
+  execFileSync("git", ["reset", "--hard"], { cwd: r.dir });
+
+  const landed = await applyPatchRebasing(r.dir, frozen);
+  assert.equal(landed.mode, "exact");
+  assert.deepEqual([...readFileSync(join(r.dir, "fixture.bin"))], [0, 1, 2, 255, 0, 7]);
+});
+
+test("gitignored output is never pulled into the diff", async () => {
+  const r = repo(BASE);
+  write(r.dir, ".gitignore", "node_modules/\n*.tsbuildinfo\n");
+  r.commit(BASE); // commit the .gitignore via the helper's add -A
+  write(r.dir, "node_modules/pkg/index.js", "module.exports = 1;\n");
+  write(r.dir, "app.tsbuildinfo", "{}\n");
+  write(r.dir, "real.ts", "export const r = 1;\n");
+
+  const diff = await gitDiff(r.dir);
+  assert.match(diff, /real\.ts/);
+  assert.doesNotMatch(diff, /node_modules/);
+  assert.doesNotMatch(diff, /tsbuildinfo/);
+});
+
+test("agent scratch artifacts are excluded even when not gitignored", async () => {
+  const r = repo(BASE);
+  // Written by applyPatchRebasing / explain / overview+risks+quiz respectively.
+  write(r.dir, ".babysit-proposal.patch", "stale patch\n");
+  write(r.dir, "explanation.md", "# explanation\n");
+  write(r.dir, "overview/risks.json", "{}\n");
+  write(r.dir, "real.ts", "export const r = 1;\n");
+
+  const diff = await gitDiff(r.dir);
+  assert.match(diff, /real\.ts/);
+  for (const scratch of [".babysit-proposal.patch", "explanation.md", "overview/risks.json"]) {
+    assert.doesNotMatch(diff, new RegExp(scratch.replace(/[.*]/g, "\\$&")));
+  }
+});
+
+test("a clean worktree still yields an empty diff (the fix_noop signal)", async () => {
+  assert.equal((await gitDiff(repo(BASE).dir)).trim(), "");
+});

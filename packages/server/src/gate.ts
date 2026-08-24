@@ -29,6 +29,14 @@ export interface GateOpts {
   light?: boolean;
   /** Repo-relative paths the proposal touched — scopes lint in light mode. */
   changedFiles?: string[];
+  /**
+   * Repo-relative paths the PR BRANCH changed against the base branch (see
+   * worktrees.branchChangedFiles). Used ONLY to decide which workspace packages
+   * have stale seeded build artifacts and must be rebuilt before the light
+   * typecheck — never to scope lint, which stays on the proposal's own diff so a
+   * reviewed change isn't blocked by lint elsewhere in the PR.
+   */
+  branchFiles?: string[];
 }
 
 async function run(cmd: string, args: string[], cwd: string): Promise<{ ok: boolean; out: string }> {
@@ -72,7 +80,14 @@ export async function runGate(dir: string, repo: string, opts: GateOpts = {}): P
 
     // Light mode (apply/instruction proposals): verify the diff, not the repo.
     if (opts.light) {
-      const light = await runLightGate(dir, scripts, hasYarn, runner, opts.changedFiles ?? []);
+      const light = await runLightGate(
+        dir,
+        scripts,
+        hasYarn,
+        runner,
+        opts.changedFiles ?? [],
+        opts.branchFiles ?? []
+      );
       if (light.ran) return light;
       // Fall through to the full gate if we couldn't scope a light check.
     }
@@ -177,21 +192,31 @@ async function runLightGate(
   scripts: Record<string, string>,
   hasYarn: boolean,
   runner: string,
-  changedFiles: string[]
+  changedFiles: string[],
+  branchFiles: string[] = []
 ): Promise<GateResult> {
   const details: string[] = [];
   let ranSomething = false;
 
   // Monorepo cross-package staleness fix: the light gate typechecks the app
-  // against sibling packages' seeded `lib/*.d.ts` (from the base clone). When
-  // the diff itself changes a workspace package (e.g. adds an export to
-  // `@myorg/some-pkg`), those seeded `.d.ts` are STALE — `typecheck-app` then
-  // reports the PR's own new symbols as "missing" in files the diff didn't
-  // touch (a false failure that escalates as inconclusive). Rebuild ONLY the
-  // touched packages first (scoped, not the whole `pre-build` fan-out) so the
-  // app typechecks against fresh declarations. A rebuild failure is a real,
-  // in-diff signal — surface it as a gate failure.
-  const rebuilt = await rebuildChangedPackages(dir, hasYarn, runner, changedFiles);
+  // against sibling packages' seeded `lib/*.d.ts`, which come from the base clone
+  // and are therefore built from the BASE BRANCH. Any workspace package modified
+  // on the way to this worktree's tree has stale declarations, and `typecheck-app`
+  // then reports the new symbols as missing in files the fix never touched — a
+  // false failure that parks the proposal as inconclusive.
+  //
+  // Two sources of staleness, and both must be covered:
+  //  - the fix's own diff (it edited a package), and
+  //  - the PR BRANCH's diff against base (`branchFiles`) — the far more common
+  //    case: the PR widens a type in `packages/foo/src` and every app file using
+  //    it fails against master's `lib/*.d.ts`. Scoping the rebuild to the fix diff
+  //    alone missed this entirely, so such PRs could never gate cleanly.
+  // Still scoped (not the whole `pre-build` fan-out): only the touched packages.
+  // A rebuild failure is a real signal — surface it as a gate failure.
+  const rebuilt = await rebuildChangedPackages(dir, hasYarn, runner, [
+    ...changedFiles,
+    ...branchFiles,
+  ]);
   if (rebuilt) {
     ranSomething = true;
     details.push(rebuilt.detail);

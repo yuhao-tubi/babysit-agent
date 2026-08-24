@@ -9,6 +9,7 @@ import {
   remoteHeadSha,
   pushFastForward,
   applyPatchRebasing,
+  branchChangedFiles,
 } from "./worktrees.js";
 import { runGate } from "./gate.js";
 import {
@@ -224,6 +225,12 @@ async function proposeCode(
     lightDeps: !isCi,
   });
   const baseSha = remoteSha;
+  // The PR's own diff against the base branch. Feeds the light gate's stale-
+  // artifact rebuild (see gate.ts runLightGate): the worktree's seeded
+  // `packages/*/lib` declarations are built from the base branch, so every
+  // workspace package the PR modified needs rebuilding before the app typecheck —
+  // otherwise the gate fails on the PR's own new symbols and parks inconclusive.
+  const branchFiles = isCi ? [] : await branchChangedFiles(dir);
   try {
     // Fix→gate loop. The agent makes the change, then the gate runs; if the
     // gate fails ONLY because of files the agent touched, re-run the agent with
@@ -284,7 +291,7 @@ async function proposeCode(
         s.repo,
         isCi
           ? { ciClass, testTarget: verdict.ci_test_target }
-          : { light: true, changedFiles: changedFiles(diff) }
+          : { light: true, changedFiles: changedFiles(diff), branchFiles }
       );
       logEvent(s.id, "gate", gate.detail.slice(0, 1000));
       if (gate.ran && gate.passed) break;
@@ -518,7 +525,14 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
       s.repo,
       isCi
         ? { ciClass, testTarget: verdict?.ci_test_target }
-        : { light: true, changedFiles: changedFiles(landed.diff) }
+        : {
+            light: true,
+            changedFiles: changedFiles(landed.diff),
+            // Same stale-seeded-artifact rebuild as the propose path. Unaffected by
+            // the applied patch: the three-dot diff reads committed HEAD, and the
+            // landed patch is still only in the working tree.
+            branchFiles: await branchChangedFiles(dir),
+          }
     );
     logEvent(s.id, "gate", `re-gate on approve: ${gate.detail.slice(0, 1000)}`);
     if (!gate.ran) {
@@ -731,11 +745,25 @@ async function runFixAgent(dir: string, prompt: string): Promise<string> {
   return summary;
 }
 
-/** Repo-relative paths touched by a `git diff HEAD`. */
+/**
+ * Repo-relative paths touched by a `git diff HEAD` — additions, modifications and
+ * deletions alike.
+ *
+ * Two header forms, because neither alone is complete: `+++ b/<path>` covers every
+ * text hunk but is absent for a BINARY file (git emits only the `diff --git`
+ * header + `GIT binary patch`) and points at `/dev/null` for a DELETION. The
+ * `diff --git a/<p> b/<p>` line is always present, so it backfills both — the
+ * backreference keeps it to same-path entries, leaving renames (differing a/b) to
+ * the `+++` form. Under-reporting here weakens real guardrails: the size limit,
+ * the gate relatedness check, and Approve's blast-radius comparison.
+ */
 function changedFiles(diff: string): string[] {
   const files = new Set<string>();
   for (const m of diff.matchAll(/^\+\+\+ b\/(.+)$/gm)) {
     if (m[1] && m[1] !== "/dev/null") files.add(m[1]);
+  }
+  for (const m of diff.matchAll(/^diff --git a\/(.+) b\/\1$/gm)) {
+    if (m[1]) files.add(m[1]);
   }
   return [...files];
 }
