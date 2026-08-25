@@ -17,9 +17,11 @@ const {
   getThread,
   updateThread,
   failStuckExplanations,
+  listAutoOverviewCandidates,
+  failStuckOverviews,
 } = await import("./db.js");
 
-function seedPr(prKey: string): void {
+function seedPr(prKey: string, role: "author" | "reviewer" = "author"): void {
   const [ownerRepo, num] = prKey.split("#");
   const [owner, repo] = ownerRepo.split("/");
   upsertPr({
@@ -31,7 +33,7 @@ function seedPr(prKey: string): void {
     url: "u",
     headRef: "feat",
     headSha: "livehead",
-    role: "author",
+    role,
   });
 }
 
@@ -134,4 +136,45 @@ test("failStuckExplanations leaves ready rows untouched", () => {
   const reset = failStuckExplanations();
   assert.ok(!reset.includes(id));
   assert.equal(getThread(id)!.explanationStatus, "ready");
+});
+
+// ---- Auto-generated review briefs: which reviewer PRs the poll cycle picks ----
+
+test("listAutoOverviewCandidates picks never-generated reviewer PRs, newest first, capped", () => {
+  seedPr("auto/r#101", "reviewer");
+  seedPr("auto/r#102", "reviewer");
+  seedPr("auto/r#103", "reviewer");
+  // #102 already has a brief → not a candidate.
+  updatePrOverview("auto/r#102", { overviewStatus: "ready", overviewMd: "done" });
+
+  assert.deepEqual(
+    listAutoOverviewCandidates(2).map((p) => p.prKey),
+    ["auto/r#103", "auto/r#101"]
+  );
+});
+
+test("failStuckOverviews resets an interrupted brief with nothing to show to 'idle'", () => {
+  // A restart killed the run before it produced any prose. `failed` would be a
+  // lie AND would opt the PR out of auto-generation forever, so the truthful
+  // state is `idle` — never generated, pick it up next cycle.
+  seedPr("auto/r#110", "reviewer");
+  updatePrOverview("auto/r#110", { overviewStatus: "generating" });
+
+  const reset = failStuckOverviews();
+  assert.ok(reset.includes("auto/r#110"));
+  assert.equal(getPrOverview("auto/r#110")!.overviewStatus, "idle");
+});
+
+test("failStuckOverviews still fails an interrupted RE-generation, keeping its prose", () => {
+  seedPr("auto/r#111", "reviewer");
+  updatePrOverview("auto/r#111", { overviewMd: "the previous brief", overviewStatus: "ready" });
+  updatePrOverview("auto/r#111", { overviewStatus: "generating" });
+
+  failStuckOverviews();
+  const pr = getPrOverview("auto/r#111")!;
+  assert.equal(pr.overviewStatus, "failed", "had content → not a never-generated PR");
+  assert.equal(pr.overviewMd, "the previous brief", "the old brief stays readable");
+  const candidates = listAutoOverviewCandidates(50).map((p) => p.prKey);
+  assert.ok(!candidates.includes("auto/r#111"), "a failed re-generation is never auto-retried");
+  assert.ok(candidates.includes("auto/r#110"), "the reset-to-idle one IS picked up");
 });

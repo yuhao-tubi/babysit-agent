@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { loadConfig, sdkEnv } from "./config.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { getPrHead } from "./gh.js";
-import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
+import {
+  getPrOverview,
+  updatePrOverview,
+  logEvent,
+  listAutoOverviewCandidates,
+} from "./db.js";
 import type { PrOverview } from "./db.js";
 import type { DiagramSection, DiagramSet, RiskItem } from "./types.js";
 import { isIgnoredRepo } from "./classify.js";
@@ -16,8 +21,10 @@ import { analyzeRisks } from "./risks.js";
 
 /**
  * PR-level overview + SVG DIAGRAM SET — a Session-level artifact that lives
- * OUTSIDE the Thread/Verdict lifecycle. On-demand, read-only w.r.t. GitHub (so
- * `dryRun` does not gate it); the only persistence is the DB.
+ * OUTSIDE the Thread/Verdict lifecycle. Read-only w.r.t. GitHub (so `dryRun` does
+ * not gate it); the only persistence is the DB. Triggered by the owner's Generate
+ * click, or — for reviewer PRs that never had one — auto-started by the poll cycle
+ * (see `runAutoOverviews`).
  *
  * One agent investigation produces the prose overview AND up to three diagrams
  * (one per 4W1H section). The agent AUTHORS a self-contained `<svg>` per section
@@ -553,6 +560,39 @@ export function requestOverview(prKey: string): { ok: boolean; reason?: string }
     }
   });
   return { ok: true };
+}
+
+/**
+ * The review briefs this poll cycle should generate WITHOUT being asked: reviewer
+ * PRs that have never had one, newest first, capped by `autoMaxPerCycle`.
+ *
+ * Separate from `runAutoOverviews` so the selection — the part with the policy in
+ * it — is checkable without launching an agent. Takes the overview config block so
+ * a caller (and a test) can ask the question against a specific configuration;
+ * defaults to the loaded config.
+ */
+export function autoOverviewPrKeys(overview = loadConfig().overview): string[] {
+  if (!overview.enabled || !overview.autoGenerate) return [];
+  return listAutoOverviewCandidates(overview.autoMaxPerCycle).map((p) => p.prKey);
+}
+
+/**
+ * Start the auto-generated briefs for this poll cycle. Fire-and-forget per PR (each
+ * goes through `requestOverview`, so it lands in the per-repo `overviewQueue` and
+ * shares the same in-flight guard, `generating` status, and SSE events as a
+ * clicked Generate). Returns the pr_keys actually started.
+ *
+ * Called from the daemon's poll loop, NOT from `pollOnce` — `poll-once` must stay a
+ * free read-only check that spends no tokens and starts no agent it would abandon
+ * on exit.
+ */
+export function runAutoOverviews(): string[] {
+  const started: string[] = [];
+  for (const prKey of autoOverviewPrKeys()) {
+    if (requestOverview(prKey).ok) started.push(prKey);
+  }
+  if (started.length) logEvent(null, "overview", `auto-generating ${started.join(", ")}`);
+  return started;
 }
 
 /**

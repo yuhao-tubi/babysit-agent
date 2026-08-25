@@ -32,6 +32,7 @@ import {
 } from "./db.js";
 import type { ThreadGroup } from "./gh.js";
 import { emit } from "./events.js";
+import { runAutoOverviews } from "./overview.js";
 
 export interface PollResult {
   prsChecked: number;
@@ -335,7 +336,12 @@ function upsertThread(
   return null;
 }
 
-/** Background loop. */
+/**
+ * Background loop. This — not `pollOnce` — is where auto-generated review briefs
+ * are kicked off, so the `poll-once` CLI stays a free read-only check that spends
+ * no tokens and starts no agent it would abandon on exit. It runs AFTER the cycle,
+ * because the cycle is what upserts the reviewer PRs the briefs are picked from.
+ */
 export function startPoller(onCycle?: (r: PollResult) => void): NodeJS.Timeout {
   const cfg = loadConfig();
   const tick = async () => {
@@ -344,6 +350,10 @@ export function startPoller(onCycle?: (r: PollResult) => void): NodeJS.Timeout {
       console.log(
         `[poll] checked ${r.prsChecked} PRs, ${r.newThreads.length} new/reopened thread(s)`
       );
+      // Fire-and-forget: each brief queues on the per-repo overviewQueue, so a long
+      // generation never delays the next poll cycle.
+      const auto = runAutoOverviews();
+      if (auto.length) console.log(`[poll] auto-generating ${auto.length} review brief(s)`);
       onCycle?.(r);
     } catch (err: any) {
       console.error("[poll] cycle failed:", err?.message ?? err);

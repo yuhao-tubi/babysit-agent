@@ -129,6 +129,21 @@ export interface OverviewConfig {
   /** Agent turn budget for the read-only PR-wide investigation. */
   maxTurns: number;
   /**
+   * Auto-generate the review brief for REVIEWER-role PRs the poll cycle has never
+   * generated one for, so it's already waiting when you open the PR (the whole
+   * point: you were clicking Generate and waiting). Author PRs are excluded — they
+   * run on the expensive default model and you wrote the code. Read-only, so
+   * `dryRun` does not gate it. Flip false to make every brief click-only again.
+   */
+  autoGenerate: boolean;
+  /**
+   * Ceiling on auto-generated briefs started per poll cycle (newest PR first).
+   * Bounds the day-one backlog: a pile of open review requests drains a couple per
+   * cycle instead of launching a stampede of agents and worktrees at once. 0 has
+   * the same effect as `autoGenerate: false`.
+   */
+  autoMaxPerCycle: number;
+  /**
    * Model for the READ-ONLY, reviewer-facing artifacts — reviewer
    * overview + Verified Risk Analysis, the PR-comprehension quiz, and reviewer
    * Q&A. These consume-or-ask flows favor speed, so they run on a faster/cheaper
@@ -208,6 +223,10 @@ const DEFAULTS: Config = {
     // each, PLUS (reviewer PRs) the finder→confirmer risk analysis in the same
     // budget. Generous so a large PR's investigation + repair retry all fit.
     maxTurns: 150,
+    // On by default: a review request you're pinged about should be prepped before
+    // you open it. Two per cycle keeps a backlog draining without a stampede.
+    autoGenerate: true,
+    autoMaxPerCycle: 2,
     // Reviewer-facing read-only artifacts run on sonnet for speed; author work
     // and the push path stay on bedrockModelName (opus). See OverviewConfig.
     reviewerModelName: "claude-sonnet",

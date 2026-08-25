@@ -589,6 +589,32 @@ export function listReviewerPrs(): PrRow[] {
 }
 
 /**
+ * Reviewer-role PRs whose review brief has NEVER been generated (`overview_status`
+ * `idle` or absent) — the auto-generation work list for one poll cycle, NEWEST PR
+ * first and capped at `limit`.
+ *
+ * Deliberately narrow: `ready` is done, `generating` is in flight, and `failed` is
+ * NOT auto-retried (one broken PR must never eat a slot every cycle — the owner
+ * re-triggers it with Regenerate). Author PRs are excluded: their brief runs on the
+ * expensive default model and the owner wrote the code. Staleness is not a
+ * candidate either — a pushed-to PR keeps its brief and shows the stale hint.
+ */
+export function listAutoOverviewCandidates(limit: number): PrRow[] {
+  if (limit <= 0) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
+       FROM prs
+       WHERE role='reviewer' AND expired_at IS NULL
+         AND (overview_status IS NULL OR overview_status='idle')
+       ORDER BY number DESC
+       LIMIT ?`
+    )
+    .all(limit);
+  return rows.map(rowToPrRow);
+}
+
+/**
  * One page of expired PRs (merged/closed since last seen), most-recently expired
  * first. Retained so the owner can still inspect their history in the dashboard's
  * dedicated "Expired" view; both authored and reviewer roles are included. Offset
@@ -809,8 +835,9 @@ export function updatePrOverview(
 
 /**
  * Startup sweep: an overview left `generating` by a crash owes GitHub nothing
- * (unlike an interrupted Thread), so it is NOT auto-resumed — just reset to
- * `failed` so the owner can re-click Generate. Returns the pr_keys reset.
+ * (unlike an interrupted Thread), so it is NOT auto-resumed — it is reset so the
+ * owner can re-click Generate. Which state it resets TO depends on whether it had
+ * produced anything (see the comment on the UPDATE). Returns the pr_keys reset.
  */
 export function failStuckOverviews(): string[] {
   const db = getDb();
@@ -818,7 +845,20 @@ export function failStuckOverviews(): string[] {
     .prepare("SELECT pr_key FROM prs WHERE overview_status='generating'")
     .all() as { pr_key: string }[];
   if (!stuck.length) return [];
-  db.prepare("UPDATE prs SET overview_status='failed' WHERE overview_status='generating'").run();
+  // A run that produced NOTHING yet (no prose on the row) resets to `idle`, not
+  // `failed`: `idle` is the truthful state — it never generated — and since a
+  // `failed` brief is deliberately never auto-retried, marking it failed would
+  // permanently opt an auto-picked reviewer PR out of generation just because the
+  // daemon restarted mid-run. A row that ALREADY has prose (a re-generation, or a
+  // Q&A pass) still goes `failed`, which keeps the existing text on screen.
+  db.prepare(
+    `UPDATE prs
+        SET overview_status = CASE
+              WHEN overview_md IS NULL OR overview_md='' THEN 'idle'
+              ELSE 'failed'
+            END
+      WHERE overview_status='generating'`
+  ).run();
   return stuck.map((r) => r.pr_key);
 }
 
