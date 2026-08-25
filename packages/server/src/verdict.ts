@@ -3,6 +3,9 @@ import { loadConfig, sdkEnv } from "./config.js";
 import { isMaxTurnsError } from "./sdk.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { materializeCiLog } from "./ci.js";
+import { preTriage } from "./triage.js";
+import { logEvent } from "./db.js";
+import { emit } from "./events.js";
 import type { FeedbackItem, ThreadRow, Verdict } from "./types.js";
 import { getPrHead, getPrBody } from "./gh.js";
 
@@ -35,7 +38,7 @@ const VERDICT_SYSTEM = `You triage code-review feedback on a pull request. You w
 
 You MUST end your response with a single fenced JSON block (\`\`\`json ... \`\`\`) and nothing after it, matching:
 {
-  "action": "propose" | "reply" | "escalate" | "amend_pr_body",
+  "action": "propose" | "reply" | "escalate" | "amend_pr_body" | "dismiss",
   "summary": "<one sentence: what the feedback wants and your decision>",
   "reply_draft": "<the reply to post on GitHub; for propose this is the acknowledgement posted after the change is applied; for amend_pr_body this accompanies the description edit>",
   "risk": "low" | "medium" | "high",
@@ -47,6 +50,7 @@ Decision rules:
 - propose: a concrete code change is needed AND you are confident exactly what it is and that it is safe. The change is built and gate-verified, then parked for the owner to Approve (or auto-pushed for auto-push-enabled classes) — you are NOT pushing blindly, so propose whenever a clear, safe code change addresses the feedback.
 - reply: NO code change needed AND no human judgment needed — e.g. a bot false-positive (prove it by citing the file/lines that already handle the concern), a nit you can decline with reasoning, or a factual question with a clear answer.
 - amend_pr_body: the feedback disputes the PR DESCRIPTION text itself (not the code), and the fix is an intent-preserving edit to that description — see the PR-description policy below.
+- dismiss: the thread asks for NOTHING — a bot review-summary header or scaffold with no findings, empty/boilerplate text, pure approval or praise ("LGTM", "thanks"), or an echo of your own earlier reply with nothing new. The thread is closed silently: no reply is posted, nothing is written to GitHub. This is NOT a way to disagree: if the feedback makes ANY concrete claim about the code — including a nit or a suspected false positive — you must reply (citing proof), propose, or escalate instead. When in doubt, do not dismiss.
 - escalate: a DECISION is needed and there is no single change to propose — a design tradeoff, an ambiguous request, or a real bug whose fix is unclear or risky. Set escalate whenever you are unsure. When you escalate, populate "options" with the concrete choices you see (each phrased as an instruction the owner could send, e.g. "change only this line" / "update all four call sites for consistency"); omit options only when there is genuinely nothing to choose between.
 
 Author-class policy (provided to you):
@@ -191,7 +195,7 @@ export function parseVerdict(text: string, isCi = false): Verdict {
   const action = obj.action;
   // CI verdicts are propose | escalate only (decision Q8); any other action
   // (including a malformed one) coerces to escalate rather than throwing.
-  if (!isCi && !["propose", "reply", "escalate", "amend_pr_body"].includes(action)) {
+  if (!isCi && !["propose", "reply", "escalate", "amend_pr_body", "dismiss"].includes(action)) {
     throw new Error(`invalid verdict action: ${action}`);
   }
   let v: Verdict = {
@@ -250,13 +254,13 @@ function bodyDiff(oldBody: string, newBody: string): string {
   return out.join("\n");
 }
 
-/** Run the read-only verdict engine for a thread. Performs NO writes. */
+/**
+ * Run the read-only verdict engine for a thread. Performs NO GitHub or repo
+ * writes — the only thing it records is a local Thread event (`logEvent`) for the
+ * pre-triage fast path.
+ */
 export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<Verdict> {
   const isCi = s.authorClass === "ci";
-  const [head, prBody] = await Promise.all([
-    getPrHead(s.owner, s.repo, s.number),
-    isCi ? Promise.resolve("") : getPrBody(s.owner, s.repo, s.number),
-  ]);
 
   // For CI, materialize the failing log to a file OUTSIDE the worktree first.
   // `materializeCiLog` retries transient `gh`/network failures and THROWS if they
@@ -276,6 +280,28 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
       };
     }
   }
+
+  // Fast path: a text-only pre-triage (no agent, no checkout — see triage.ts)
+  // settles the "this thread asks for nothing" case in seconds, BEFORE we
+  // provision a worktree and take the per-repo SerialQueue hostage for minutes. It
+  // runs before the PR-head/body lookups too, so a dismissed thread costs no `gh`
+  // round-trips at all. Skipped for CI: a failing check always has an ask.
+  // `preTriage` never throws and never dismisses on an API/parse/timeout failure,
+  // so any doubt falls through to the grounded verdict below — which can also
+  // reach `dismiss` on its own.
+  if (!isCi) {
+    const triage = await preTriage(items, s.authorClass);
+    if (triage.dismiss) {
+      logEvent(s.id, "pre_triage", `dismiss: ${triage.reason}`);
+      emit({ type: "thread_updated", threadId: s.id });
+      return { action: "dismiss", summary: triage.reason, reply_draft: "", risk: "low" };
+    }
+  }
+
+  const [head, prBody] = await Promise.all([
+    getPrHead(s.owner, s.repo, s.number),
+    isCi ? Promise.resolve("") : getPrBody(s.owner, s.repo, s.number),
+  ]);
 
   // Read-only investigation runs in a worktree on the PR head (not master), so
   // the agent sees the actual PR code. Torn down in `finally`. `skipDeps`: the

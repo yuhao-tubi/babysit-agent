@@ -10,8 +10,11 @@
  * Kept separate from executor.ts (which orchestrates agent runs) on purpose:
  * this never touches GitHub or a worktree and never parks a Proposal — the
  * refined text is handed back to the box for the owner to edit and submit.
+ *
+ * The Bedrock call itself lives in `bedrock-auth.ts` (`invokeModel`) — the one
+ * shared direct-model path, so this file is just prompt + shaping.
  */
-import { getBedrockSession } from "./bedrock-auth.js";
+import { invokeModel } from "./bedrock-auth.js";
 
 const REFINE_SYSTEM =
   "You refine a PR author's draft text (a code-review reply or an instruction to an automated fixing agent). Apply the author's note and return ONLY the rewritten text — no preamble, no quotes, no commentary. Keep it concise and professional, preserve the author's intent and any technical specifics, and use Markdown where the original would. If the draft is empty, write a sensible draft from the note alone.";
@@ -44,43 +47,14 @@ export async function refineText(input: RefineInput): Promise<string> {
   parts.push("");
   parts.push("Return only the rewritten text.");
 
-  const { token, region, modelArn } = await getBedrockSession();
-  const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(
-    modelArn
-  )}/invoke`;
-
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 1024,
-        temperature: 0.3,
-        system: REFINE_SYSTEM,
-        messages: [{ role: "user", content: parts.join("\n") }],
-      }),
-    });
-  } catch (err) {
-    throw new Error(`refine: Bedrock request failed (network): ${(err as Error).message}`);
-  }
-  if (!res.ok) {
-    const text = (await res.text().catch(() => "")).slice(0, 300);
-    throw new Error(`refine: Bedrock rejected ${res.status} ${res.statusText}: ${text}`);
-  }
-
-  const data = (await res.json()) as {
-    content?: { type: string; text?: string }[];
-  };
-  const out = (data.content ?? [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text ?? "")
-    .join("")
-    .trim();
+  const out = (
+    await invokeModel({
+      system: REFINE_SYSTEM,
+      prompt: parts.join("\n"),
+      maxTokens: 1024,
+      temperature: 0.3,
+      label: "refine",
+    })
+  ).trim();
   return out || draft;
 }

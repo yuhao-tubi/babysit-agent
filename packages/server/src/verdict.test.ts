@@ -77,3 +77,24 @@ test("ci: coerces a non-propose action to escalate", () => {
   const v = parseVerdict(text, true);
   assert.equal(v.action, "escalate");
 });
+
+// ---- dismiss ----
+// The 5th action: the thread asks for nothing, so it resolves with no reply and no
+// GitHub write. It must survive the parser like any other action — and must NEVER
+// be a valid CI verdict (a failing check always has an ask).
+
+test("a dismiss verdict parses for a review thread", () => {
+  const text = [
+    "```json",
+    '{ "action": "dismiss", "summary": "Codex summary header, no findings", "reply_draft": "", "risk": "low" }',
+    "```",
+  ].join("\n");
+  const v = parseVerdict(text);
+  assert.equal(v.action, "dismiss");
+  assert.equal(v.reply_draft, "");
+});
+
+test("a dismiss verdict is coerced to escalate for CI", () => {
+  const text = '{ "action": "dismiss", "summary": "s", "reply_draft": "", "risk": "low" }';
+  assert.equal(parseVerdict(text, true).action, "escalate");
+});

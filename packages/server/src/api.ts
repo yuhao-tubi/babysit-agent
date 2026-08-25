@@ -307,7 +307,11 @@ export async function startServer(port: number): Promise<void> {
     async (req, reply) => {
       const id = Number(req.params.id);
       const instruction = req.body?.instruction;
-      if (!instruction) return reply.code(400).send({ error: "instruction required" });
+      // `.trim()`: a whitespace-only instruction passed this check but is dropped
+      // by `execute`, which then falls through to the STORED verdict — so a blank
+      // submit on a `dismiss` thread would silently re-resolve it instead of
+      // re-proposing. Reject it here rather than act on something unintended.
+      if (!instruction?.trim()) return reply.code(400).send({ error: "instruction required" });
       void applyInstruction(id, instruction);
       return { ok: true };
     }

@@ -213,6 +213,19 @@ export async function execute(
     }
   }
 
+  // ---- dismiss ----
+  // Nothing was asked (bot summary header, boilerplate, LGTM, an echo of our own
+  // reply). Resolve the Thread locally: no Proposal to park, no reply to post, and
+  // deliberately NO GitHub write — not even resolving an inline review thread,
+  // which stays the owner's call via "Mark resolved". `dryRun` is therefore moot.
+  // The poller only re-opens a resolved Thread on genuinely new activity
+  // (poller.ts upsertThread), so this stays quiet without touching GitHub.
+  if (action === "dismiss") {
+    logEvent(s.id, "dismissed", verdict.summary || "nothing actionable in this thread");
+    emit({ type: "thread_updated", threadId: s.id });
+    return "resolved";
+  }
+
   // ---- amend_pr_body ----
   // A PR-description proposal: drafted, parked at awaiting_approval, and applied
   // only on Approve (never autonomously). It carries no code diff, so there is

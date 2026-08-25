@@ -9,8 +9,14 @@ export type AuthorClass = "bot" | "human" | "ci";
  * approve, optionally with `options`). `amend_pr_body` is the PR-description
  * flavor of a proposal; it parks at `awaiting_approval` like `propose` and is
  * applied only on Approve.
+ * `dismiss` means the Thread asks for NOTHING (a bot review-summary header,
+ * boilerplate, "LGTM", an echo of the agent's own reply): the Thread resolves
+ * locally with no reply, no diff and NO GitHub write at all. It is never a way to
+ * disagree with feedback — any concrete claim about the code is still `reply`
+ * (with cited proof), `propose` or `escalate`. See triage.ts for the fast path
+ * that reaches this verdict without a checkout.
  */
-export type VerdictAction = "propose" | "reply" | "escalate" | "amend_pr_body";
+export type VerdictAction = "propose" | "reply" | "escalate" | "amend_pr_body" | "dismiss";
 
 /**
  * Gate class for a CI failure — selects which local check the pre-push gate must

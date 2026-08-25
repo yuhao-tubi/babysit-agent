@@ -141,6 +141,72 @@ export async function getBedrockSession(): Promise<BedrockSession> {
   return cache;
 }
 
+/** One-shot `InvokeModel` request. No tools, no multi-turn loop — just text in, text out. */
+export interface InvokeModelInput {
+  /** System prompt. */
+  system: string;
+  /** The single user message. */
+  prompt: string;
+  maxTokens: number;
+  temperature?: number;
+  /** Friendly model name; omit for the default (`bedrockModelName`). */
+  modelName?: string;
+  /** Hard wall-clock cap. A hung connection must never stall a caller (default 30s). */
+  timeoutMs?: number;
+  /** Prefix for thrown error messages, e.g. "refine" / "pre-triage". */
+  label: string;
+}
+
+/**
+ * The single direct-Bedrock call path for one-shot, tool-less model use (the
+ * dashboard's AI-refine helper, the Verdict pre-triage). Agent runs go through
+ * the Agent SDK with `sdkEnv()` instead — this is deliberately the ONE other
+ * surface, so URL/auth/body/timeout/response-shape live in exactly one place.
+ *
+ * Throws on network failure, a non-2xx response, or the timeout; callers decide
+ * whether that is fatal or a fall-through.
+ */
+export async function invokeModel(input: InvokeModelInput): Promise<string> {
+  const { token, region } = await getBedrockSession();
+  const modelArn = await resolveModelArn(input.modelName);
+  const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(
+    modelArn
+  )}/invoke`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        anthropic_version: "bedrock-2023-05-31",
+        max_tokens: input.maxTokens,
+        temperature: input.temperature ?? 0.3,
+        system: input.system,
+        messages: [{ role: "user", content: input.prompt }],
+      }),
+      // A stalled socket is worse than an error for the callers on the per-repo
+      // SerialQueue: it holds the queue open with nothing to show for it.
+      signal: AbortSignal.timeout(input.timeoutMs ?? 30_000),
+    });
+  } catch (err) {
+    throw new Error(`${input.label}: Bedrock request failed: ${(err as Error).message}`);
+  }
+  if (!res.ok) {
+    const text = (await res.text().catch(() => "")).slice(0, 300);
+    throw new Error(`${input.label}: Bedrock rejected ${res.status} ${res.statusText}: ${text}`);
+  }
+  const data = (await res.json()) as { content?: { type: string; text?: string }[] };
+  return (data.content ?? [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("");
+}
+
 /**
  * Resolve the inference-profile ARN for a friendly model name (e.g.
  * `claude-sonnet`) under the current token. `undefined`/empty falls back to the

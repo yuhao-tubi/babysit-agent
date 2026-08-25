@@ -33,6 +33,7 @@ packages/server/src
   poller.ts     discover authored PRs → upsert Threads (the poll cycle)
   gh.ts         all `gh` CLI calls (PRs, comments, resolution state, push, reply)
   classify.ts   author-class + repo-scope (ignoreRepos) determination
+  triage.ts     text-only pre-triage (no agent/checkout) → `dismiss` or carry on
   verdict.ts    Agent SDK call: read-only checkout → structured Verdict
   gate.ts       pre-push gate: build/test or repo-type validator
   executor.ts   acts on a Verdict (fix+push / reply / amend / escalate)
@@ -94,6 +95,13 @@ documented keys.
   - Never act on a GitHub-resolved Thread — checked at creation *and* just
     before action. Repo scope (`ignoreRepos`) is enforced in the pipeline, not
     just the poller.
+  - **`dismiss` is the one Verdict with no Proposal and no GitHub write.** A Thread
+    that asks for nothing (bot summary header, boilerplate, LGTM, an echo of our
+    own reply) resolves locally — no reply, no diff, not even a GitHub thread
+    resolve. Never a way to disagree: any concrete claim about the code is still
+    `reply`/`propose`/`escalate`. `triage.ts`'s text-only pre-triage reaches it
+    without a checkout and is **fail-open** — any doubt falls through to the
+    grounded verdict. Invalid for CI.
   - `amend_pr_body` is **never** auto-applied — it is drafted as a description
     Proposal and applied only on the owner's Approve.
   - Restart recovery re-renders/re-applies durable artifacts (frozen Proposals);

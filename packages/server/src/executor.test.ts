@@ -6,9 +6,9 @@ import { join } from "node:path";
 
 process.env.BABYSIT_DATA_DIR = mkdtempSync(join(tmpdir(), "babysit-executor-test-"));
 
-const { carryReplyProgress, buildStaleRebuildInstruction, parkAlreadyNotified } = await import(
-  "./executor.js"
-);
+const { carryReplyProgress, buildStaleRebuildInstruction, parkAlreadyNotified, execute } =
+  await import("./executor.js");
+const { createThread, getThread, getEvents, upsertPr } = await import("./db.js");
 
 import type { Proposal } from "./types.js";
 
@@ -138,4 +138,62 @@ test("a high-risk verdict already banners", () => {
 
 test("no proposal parked → nothing was announced", () => {
   assert.equal(parkAlreadyNotified(row(null, "high")), false);
+});
+
+// ---- dismiss: resolves locally, writes NOTHING ----
+// The whole point of `dismiss` is that a thread asking for nothing (a bot review-
+// summary header, boilerplate, LGTM) costs the owner zero clicks. If it parked a
+// Proposal or posted anything, it would be no better than the `reply` it replaced.
+// Any GitHub call in this path would throw here (no `gh`, no network in tests).
+
+test("a dismiss verdict resolves the thread with no proposal and no reply", async () => {
+  upsertPr({
+    prKey: "o/r#9",
+    owner: "o",
+    repo: "r",
+    number: 9,
+    title: "t",
+    url: "u",
+    headRef: "feat",
+    headSha: "h",
+    role: "author",
+  });
+  const id = createThread({
+    prKey: "o/r#9",
+    owner: "o",
+    repo: "r",
+    number: 9,
+    reviewId: 123,
+    threadKey: "review:123",
+    authorClass: "bot",
+    itemGhIds: [],
+  });
+  const s = getThread(id)!;
+  const status = await execute(s, {
+    action: "dismiss",
+    summary: "Codex review summary header with no findings.",
+    reply_draft: "",
+    risk: "low",
+  });
+  assert.equal(status, "resolved");
+  const after = getThread(id)!;
+  assert.equal(after.proposalJson, null);
+  assert.equal(after.diff, null);
+  const kinds = getEvents(id).map((e) => e.kind);
+  assert.ok(kinds.includes("dismissed"), `expected a dismissed event, got ${kinds.join(",")}`);
+  // Nothing that writes to GitHub may be logged.
+  for (const k of ["replied", "pushed", "proposed", "escalated", "dry_run"]) {
+    assert.ok(!kinds.includes(k), `dismiss must not ${k}`);
+  }
+});
+
+test("an owner instruction overrides a dismiss verdict (it never silences the owner)", async () => {
+  const s = { id: 7, prKey: "o/r#9", owner: "o", repo: "r", number: 9, authorClass: "bot" } as any;
+  const status = await execute(
+    s,
+    { action: "dismiss", summary: "nothing here", reply_draft: "", risk: "low" },
+    { instruction: "reply: actually, please look again at the null check" }
+  );
+  // `reply:` parks a reply Proposal for review — it does NOT stay dismissed.
+  assert.equal(status, "awaiting_approval");
 });
