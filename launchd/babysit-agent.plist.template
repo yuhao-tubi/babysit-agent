@@ -5,8 +5,7 @@
   plist to ~/Library/LaunchAgents/. Nothing host-specific is committed here.
 
     __LABEL__      launchd label (LAUNCHD_LABEL in the Makefile)
-    __NODE_BIN__   absolute path to the `node` that provides npm (nvm-safe)
-    __NPM_CLI__    absolute path to npm-cli.js for that node
+    __NODE_BIN__   absolute path to the `node` that runs the daemon (nvm-safe)
     __WORKDIR__    this workspace's absolute path
     __HOME__       the invoking user's home dir
     __PATH__       PATH for the daemon (launchd starts with a bare one)
@@ -16,20 +15,29 @@
     <key>Label</key>
     <string>__LABEL__</string>
 
-    <!-- Run `npm run dev:server` (tsx watch) via the node that provides npm. -->
+    <!-- Run the BUILT daemon directly — no npm wrapper, no `tsx watch`.
+         This is load-bearing for KeepAlive, not a style choice. `tsx watch`
+         outlives the child it spawns: when the daemon process dies, the watcher
+         sits there waiting for a file change, so launchd still sees a live
+         ProgramArguments process and never restarts anything. The result is a
+         daemon that is down while `launchctl list` reports it healthy — one
+         crash became a multi-day silent outage.
+
+         Running node on dist/index.js makes the daemon BE the process launchd
+         supervises: a crash is an exit, and KeepAlive restarts it in
+         ThrottleInterval seconds. `make restart` rebuilds first, so editing
+         source and restarting still picks up changes. -->
     <key>ProgramArguments</key>
     <array>
         <string>__NODE_BIN__</string>
-        <string>__NPM_CLI__</string>
-        <string>run</string>
-        <string>dev:server</string>
+        <string>__WORKDIR__/packages/server/dist/index.js</string>
     </array>
 
     <key>WorkingDirectory</key>
     <string>__WORKDIR__</string>
 
-    <!-- launchd starts with a bare PATH; the daemon shells out to `gh` (Homebrew)
-         and spawns `node` for tsx, so both dirs must be present. -->
+    <!-- launchd starts with a bare PATH; the daemon shells out to `gh` (Homebrew),
+         `git`, and `node` for the gate's build/test, so both dirs must be present. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -44,6 +52,15 @@
              in-flight threads survive the switch. -->
         <key>BABYSIT_DATA_DIR</key>
         <string>__WORKDIR__/.data</string>
+        <!-- Point at the root .env/config.json explicitly. `paths.ts` finds the
+             workspace root on its own, but a missing config.json is a SILENT
+             failure (defaults win, and the default is dryRun:true — a daemon
+             that polls and logs normally while writing nothing). Naming both
+             files here means a wrong path fails loudly instead. -->
+        <key>BABYSIT_ENV_FILE</key>
+        <string>__WORKDIR__/.env</string>
+        <key>BABYSIT_CONFIG</key>
+        <string>__WORKDIR__/config.json</string>
     </dict>
 
     <!-- Login item: start at load and keep it running. -->

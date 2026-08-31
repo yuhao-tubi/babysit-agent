@@ -19,7 +19,11 @@ PRs→Threads tree and is where you unblock escalations with an Instruction.
 - **Node ≥ 22**, TypeScript, ESM (`"type": "module"`). npm workspaces monorepo.
 - **Server** (`@babysit/server`): Fastify HTTP/API, `better-sqlite3` for state,
   `@anthropic-ai/claude-agent-sdk` for verdicts/fixes, `node-notifier` for macOS
-  banners. Dev via `tsx watch`, build via `tsc`.
+  banners. Dev via `tsx watch`, build via `tsc`; the daemon runs the build.
+  Keep `better-sqlite3` on **≥13** — 13.0.0 moved the addon to the N-API, and the
+  pre-13 `node::ObjectWrap` path aborted the whole process from a GC finalizer on
+  Node ≥ 23 (`RemoveEnvironmentCleanupHook … Assertion (env) != nullptr`,
+  upstream #1515). Don't downgrade it to dodge a build issue.
 - **Web** (`@babysit/web`): Vite + React 18 + Ant Design v6, `react-markdown` +
   `remark-gfm`. Dev server proxies the API to the daemon's port.
 - GitHub access is the user's authenticated **`gh` CLI** — there is no in-app
@@ -141,22 +145,32 @@ npx tsx packages/server/src/cli.ts verdict <threadId>
 
 ## Applying changes to the running daemon
 
-The recommended run path is **native under launchd** (`npm run dev:server` via
-`tsx watch`), so a source change is picked up on the next restart — no image
-rebuild:
+The recommended run path is **native under launchd**, running the **built**
+daemon (`packages/server/dist/index.js`) directly — no npm wrapper, no
+`tsx watch`. So a source change needs a rebuild, which `make restart` does for
+you — no image rebuild:
 
 ```bash
-make restart   # kickstart the launchd agent (also picks up config.json changes)
-make logs      # tail stdout/stderr;  make status  for PID/last exit
+make restart      # rebuild + kickstart the launchd agent (source AND config.json)
+make restart-only # kickstart WITHOUT rebuilding (config.json-only changes)
+make logs         # tail stdout/stderr;  make status  for PID/last exit
 ```
 
-`tsx watch` reloads backend source on save, but the launchd agent serves the
-**prebuilt** `packages/web/dist` (via `@fastify/static`), so a frontend change
-still needs `npm run build` + a hard browser refresh.
+**Don't put `tsx watch` back under launchd.** The watcher outlives the child it
+spawns: when the daemon crashed, the watcher stayed alive waiting for a file
+change, so launchd's `KeepAlive` saw a healthy `ProgramArguments` process and
+never restarted anything. A daemon that was down for days reported healthy in
+`launchctl list`. Running node on `dist/index.js` makes the daemon *be* the
+supervised process, so a crash is an exit and KeepAlive actually fires.
+
+Because launchd serves the **prebuilt** `packages/web/dist` (via
+`@fastify/static`), a frontend change also needs the rebuild + a hard browser
+refresh — `make restart` covers both halves.
 
 For live UI work, `npm run dev:web` gives hot reload while proxying the API to a
 daemon — pair it with `npm run dev:server` (`tsx watch`) for a native dev loop
-against the same code.
+against the same code. `tsx watch` is fine *interactively*, where you can see it
+die; it is only unsafe as the supervised process.
 
 **Docker (alternative run path).** The image bakes in the built server plus the
 prebuilt `packages/web/dist` at build time — neither is bundled on the fly nor

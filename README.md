@@ -124,18 +124,27 @@ people touch. The full reference:
 (substituting this workspace's path and your `node`) into
 `~/Library/LaunchAgents/local.babysit-agent.plist` and loads it
 (`RunAtLoad` + `KeepAlive`), so the daemon
-comes up at login and respawns on crash. It runs `npm run dev:server` (tsx
-watch), so a backend source change is picked up on the next restart. The full
-target list:
+comes up at login and respawns on crash. It runs the **built** daemon
+(`packages/server/dist/index.js`) directly, so a crash is a process exit that
+`KeepAlive` can actually see — see the note below. `make restart` rebuilds first,
+so a source change is picked up. The full target list:
 
 ```bash
-make start    # symlink + load the launchd agent
-make logs     # tail stdout/stderr;  make status  for PID/last exit
-make restart  # pick up config.json changes;  make stop / uninstall
+make start        # build + load the launchd agent
+make logs         # tail stdout/stderr;  make status  for PID/last exit
+make restart      # rebuild + restart (source and config.json changes)
+make restart-only # restart without rebuilding;  make stop / uninstall
 ```
 
 The launchd agent serves the **prebuilt** `packages/web/dist`, so a frontend
-change needs `npm run build` + a hard browser refresh.
+change also needs the rebuild + a hard browser refresh — `make restart` does it.
+
+> **Why not `tsx watch` under launchd?** It used to run that way, and it hid a
+> multi-day outage. `tsx watch` does not exit when the daemon it spawned dies —
+> it waits for a file change. launchd only supervises the process it started, so
+> it saw a live watcher, kept `KeepAlive` idle, and reported the agent healthy
+> while nothing was listening on the port. Running node on the build makes the
+> daemon the supervised process, so a crash restarts it in ~10s.
 
 ### Foreground dev loop
 

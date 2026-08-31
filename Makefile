@@ -1,9 +1,15 @@
 # Makefile for the PR Babysitting Agent
 #
-# Native + launchd is the recommended run path on macOS: `npm run dev:server`
-# under a launchd agent (RunAtLoad + KeepAlive), reading/writing state directly
-# on the host disk (no VirtioFS I/O tax, real macOS escalation banners). A
-# self-contained Docker image is kept as an alternative (docker-* targets).
+# Native + launchd is the recommended run path on macOS: the BUILT daemon
+# (packages/server/dist/index.js) run directly under a launchd agent (RunAtLoad
+# + KeepAlive), reading/writing state directly on the host disk (no VirtioFS I/O
+# tax, real macOS escalation banners). A self-contained Docker image is kept as
+# an alternative (docker-* targets).
+#
+# The daemon is run directly rather than through `npm run dev:server` (tsx watch)
+# because the watcher outlives its child: a crashed daemon left the watcher alive,
+# so launchd's KeepAlive never fired and the outage was invisible to
+# `launchctl list`. `make restart` rebuilds, so the edit→restart loop is intact.
 
 SHELL := /bin/bash
 
@@ -119,13 +125,11 @@ dev: ## Run the daemon in the foreground (tsx watch; Ctrl-C to stop)
 	npm run dev:server
 
 .PHONY: start
-start: ## Install & load the launchd agent (render plist from template, bootstrap)
+start: build ## Install & load the launchd agent (render plist from template, bootstrap)
 	@test -x "$(LAUNCHD_NODE)" || { echo "no node on PATH — cannot render the plist"; exit 1; }
-	@test -f "$(LAUNCHD_NPM_CLI)" || { echo "npm-cli.js not found next to $(LAUNCHD_NODE)"; exit 1; }
 	@mkdir -p "$(HOME)/Library/LaunchAgents"
 	@sed -e 's|__LABEL__|$(LAUNCHD_LABEL)|g' \
 	     -e 's|__NODE_BIN__|$(LAUNCHD_NODE)|g' \
-	     -e 's|__NPM_CLI__|$(LAUNCHD_NPM_CLI)|g' \
 	     -e 's|__WORKDIR__|$(CURDIR)|g' \
 	     -e 's|__HOME__|$(HOME)|g' \
 	     -e 's|__PATH__|$(LAUNCHD_NODE_DIR):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin|g' \
@@ -142,9 +146,14 @@ uninstall: ## Unload & remove the launchd agent
 	@echo "daemon uninstalled ($(LAUNCHD_LABEL))"
 
 .PHONY: restart
-restart: ## Restart the launchd agent (picks up config.json changes)
+restart: build ## Rebuild + restart the launchd agent (picks up source & config.json changes)
 	@launchctl kickstart -k "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)"
 	@echo "daemon restarted ($(LAUNCHD_LABEL))"
+
+.PHONY: restart-only
+restart-only: ## Restart WITHOUT rebuilding (config.json-only changes)
+	@launchctl kickstart -k "$(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)"
+	@echo "daemon restarted, no rebuild ($(LAUNCHD_LABEL))"
 
 .PHONY: stop
 stop: ## Stop the launchd agent (until next login/kickstart)
