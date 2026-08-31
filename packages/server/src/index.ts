@@ -11,9 +11,14 @@ import { startPoller } from "./poller.js";
 import { recoverInterrupted, startProcessor } from "./processor.js";
 import { startServer } from "./api.js";
 import { sweepWorktrees } from "./worktrees.js";
+import { acquireInstanceLock } from "./singleton.js";
 
 async function main() {
   const cfg = loadConfig();
+  // BEFORE the db or any clone: refuse to be a second daemon on this data dir.
+  // Two daemons race on the same base clones' `.git` (withBaseLock is only an
+  // in-process mutex) and are two writers/actors on state.db and GitHub.
+  acquireInstanceLock(`${cfg.dbPath}.daemon.lock`);
   getDb(); // init + migrate
   console.log(
     `[babysit] starting — login=${cfg.githubLogin} dryRun=${cfg.dryRun} poll=${cfg.pollIntervalMs}ms`
@@ -27,9 +32,10 @@ async function main() {
   );
 
   // An overview left `generating` by a crash owes GitHub nothing, so it is not
-  // auto-resumed — just reset to `failed` for the owner to re-trigger.
+  // auto-resumed — just reset for the owner to re-trigger (one that produced no
+  // prose goes back to `idle`, so auto-generation picks it up next cycle).
   const reset = failStuckOverviews();
-  if (reset.length) console.log(`[babysit] reset ${reset.length} stuck overview(s) to failed`);
+  if (reset.length) console.log(`[babysit] reset ${reset.length} stuck overview(s)`);
   const resetQuiz = failStuckQuizzes();
   if (resetQuiz.length) console.log(`[babysit] reset ${resetQuiz.length} stuck quiz(zes) to failed`);
   const resetRisks = failStuckRisks();
