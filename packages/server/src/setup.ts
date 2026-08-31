@@ -25,13 +25,10 @@ import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { workspaceRoot } from "./paths.js";
 
 const exec = promisify(execFile);
 
-/** Workspace root (packages/server/src → three up). */
-function workspaceRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-}
 function envPath(): string {
   return process.env.BABYSIT_ENV_FILE || join(workspaceRoot(), ".env");
 }

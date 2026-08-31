@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { workspaceRoot } from "./paths.js";
 import { getBedrockSession, resolveModelArn } from "./bedrock-auth.js";
 import type { CheckAllowEntry } from "./ci.js";
 import type { AuthorClass } from "./types.js";
@@ -244,9 +245,7 @@ let cached: Config | null = null;
 
 /** Project root (the workspace dir containing config.json). */
 function projectRoot(): string {
-  // config.ts lives at packages/server/src/config.ts
-  const here = dirname(fileURLToPath(import.meta.url));
-  return resolve(here, "..", "..", "..");
+  return workspaceRoot();
 }
 
 export function loadConfig(): Config {

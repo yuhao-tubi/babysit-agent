@@ -8,12 +8,10 @@
  * the daemon is launched from.
  */
 import { config as loadDotenv } from "dotenv";
-import { dirname, resolve, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { workspaceRoot } from "./paths.js";
 
-// env.ts lives at packages/server/src/env.ts → workspace root is three up.
 // Containerized runs bind-mount the .env into a data dir and point
 // BABYSIT_ENV_FILE at it; otherwise fall back to the workspace-root .env.
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const envPath = process.env.BABYSIT_ENV_FILE || join(root, ".env");
+const envPath = process.env.BABYSIT_ENV_FILE || join(workspaceRoot(), ".env");
 loadDotenv({ path: envPath });
