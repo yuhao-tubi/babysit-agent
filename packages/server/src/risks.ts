@@ -1,7 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { agentGuardHooks } from "./agent-guard.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, sdkEnv } from "./config.js";
+import { ARTIFACT_EFFORT, loadConfig, sdkEnv } from "./config.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { getPrHead, getPrBody } from "./gh.js";
 import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
@@ -424,6 +425,8 @@ async function runAgent(opts: {
       systemPrompt: opts.system,
       permissionMode: "dontAsk",
       allowedTools: tools,
+      effort: ARTIFACT_EFFORT,
+      ...agentGuardHooks(opts.dir),
       settingSources: [],
       env: opts.env,
       maxTurns: opts.maxTurns,

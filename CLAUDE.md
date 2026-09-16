@@ -27,7 +27,7 @@ PRs→Threads tree and is where you unblock escalations with an Instruction.
 - **Web** (`@babysit/web`): Vite + React 18 + Ant Design v6, `react-markdown` +
   `remark-gfm`. Dev server proxies the API to the daemon's port.
 - GitHub access is the user's authenticated **`gh` CLI** — there is no in-app
-  token. Model runs on Bedrock (`us.anthropic.claude-opus-4-8`).
+  token. Model runs on Bedrock (`claude-sonnet` via the TVM).
 
 ## Layout
 

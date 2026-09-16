@@ -105,11 +105,11 @@ people touch. The full reference:
 | `maxProposalFiles` | `5` | max files a proposed change may touch before it's deemed too large and handed off as a manual plan |
 | `verdictMaxTurns` | `60` | agent turn budget for a review-comment verdict; raise it in large monorepos where locating the cited code takes more exploration |
 | `verdictCiMaxTurns` | `80` | same, for a CI-failure verdict (reading a large failing-check log needs more headroom) |
-| `bedrockModelName` | `claude-opus` | TVM model name for the author/push path (verdict/gate/executor), resolved to an inference-profile ARN |
+| `bedrockModelName` | `claude-sonnet` | TVM model name for the author/push path (verdict/gate/executor), resolved to an inference-profile ARN |
 | `overview.enabled` | `true` | master switch for the PR overview + diagram feature |
 | `overview.maxTurns` | `150` | agent turn budget for the read-only PR investigation |
 | `overview.autoGenerate` | `true` | auto-generate the brief for reviewer-role PRs that never had one, so it's ready before you open the PR; author PRs stay click-only |
-| `overview.autoMaxPerCycle` | `2` | ceiling on auto-generated briefs started per poll cycle (newest PR first); `0` = same as off |
+| `overview.autoMaxPerCycle` | `6` | ceiling on auto-generated briefs started per poll cycle (newest PR first); `0` = same as off. Sized to the artifact lane's concurrency in `queue.ts` — raise both or neither |
 | `overview.reviewerModelName` | `claude-sonnet` | faster model for read-only reviewer-facing artifacts (overview, risk analysis, quiz, Q&A) |
 | `explain.enabled` | `true` | master switch for per-Thread Explanations (the **Explain** button) |
 | `explain.maxTurns` | `60` | agent turn budget for explaining ONE question; sized like `verdictMaxTurns` (a localized investigation), not `overview.maxTurns` |

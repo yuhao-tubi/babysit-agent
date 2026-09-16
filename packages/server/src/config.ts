@@ -91,7 +91,7 @@ export interface Config {
    * always vetoes auto-push regardless of this list.
    */
   autoPushClasses: AuthorClass[];
-  /** TVM friendly model name to resolve to a Bedrock inference-profile ARN (e.g. "claude-opus"). */
+  /** TVM friendly model name to resolve to a Bedrock inference-profile ARN (e.g. "claude-sonnet"). */
   bedrockModelName: string;
   /** CI-feedback settings. */
   ci: CiConfig;
@@ -147,9 +147,9 @@ export interface OverviewConfig {
   /**
    * Model for the READ-ONLY, reviewer-facing artifacts — reviewer
    * overview + Verified Risk Analysis, the PR-comprehension quiz, and reviewer
-   * Q&A. These consume-or-ask flows favor speed, so they run on a faster/cheaper
-   * model than the author path. Author overview + Blind spots stay on
-   * `bedrockModelName` (opus), as does the whole verdict/gate/executor push path.
+   * Q&A. These consume-or-ask flows favor speed, so they may run on a
+   * faster/cheaper model than the author path. Author overview + Blind spots stay
+   * on `bedrockModelName`, as does the whole verdict/gate/executor push path.
    * Must be a model the TVM token can invoke. Default `claude-sonnet`.
    */
   reviewerModelName: string;
@@ -201,7 +201,7 @@ const DEFAULTS: Config = {
   autoPushClasses: [],
   // Agent SDK auth goes through the Bedrock TVM (bearer tokens), not an AWS
   // profile. This selects which inference-profile ARN to invoke; see bedrock-auth.ts.
-  bedrockModelName: "claude-opus",
+  bedrockModelName: "claude-sonnet",
   ci: {
     // Per-repo opt-in. Empty = CI babysitting OFF everywhere — the current
     // default while the CI-failure workflow is rebuilt. The allowlist below is
@@ -225,11 +225,18 @@ const DEFAULTS: Config = {
     // budget. Generous so a large PR's investigation + repair retry all fit.
     maxTurns: 150,
     // On by default: a review request you're pinged about should be prepped before
-    // you open it. Two per cycle keeps a backlog draining without a stampede.
+    // you open it.
     autoGenerate: true,
-    autoMaxPerCycle: 2,
+    // Sized to the artifact lane's width, NOT independently: the lane runs
+    // ARTIFACT_CONCURRENCY (8) read-only jobs per repo at once, and starting only 2
+    // per 5-minute poll meant a 16-PR backlog took 40 minutes just to get ENQUEUED
+    // — the lane sat 3/8 busy while briefs waited on the clock rather than on any
+    // resource. 6 keeps the lane fed without exceeding it in a single cycle (the
+    // queue would absorb the excess anyway, but a burst larger than the width just
+    // front-loads worktree churn). Raise these two together or neither.
+    autoMaxPerCycle: 6,
     // Reviewer-facing read-only artifacts run on sonnet for speed; author work
-    // and the push path stay on bedrockModelName (opus). See OverviewConfig.
+    // and the push path stay on bedrockModelName. See OverviewConfig.
     reviewerModelName: "claude-sonnet",
   },
   explain: {
@@ -313,6 +320,50 @@ export function loadConfig(): Config {
  * `bedrockModelName`. The env (token/region) is identical either way — only the
  * returned `modelArn` differs.
  */
+/**
+ * Reasoning effort for the READ-ONLY artifact agents (overview + diagrams, risk
+ * analysis, quiz, Explanation, reviewer Q&A).
+ *
+ * This exists because the model default is not a neutral choice. The agent
+ * options never set `thinking`, and what that MEANS changed under us when
+ * `bedrockModelName` moved from opus to sonnet:
+ *
+ *   claude-opus-4-8   omitting `thinking` ⇒ no extended thinking at all
+ *   claude-sonnet-5   omitting `thinking` ⇒ adaptive thinking, effort `high`
+ *
+ * So the model swap silently switched deep reasoning on for every agent path. A
+ * measured overview run: 772s wall clock, of which 648s (84%) was the model
+ * thinking and 34s was actually running tools — 67 turns, 31 thinking blocks,
+ * 127k output tokens for one PR brief. The dashboard's "may take a minute"
+ * became thirteen.
+ *
+ * `low` is right for THESE agents specifically: they are read-only (no push, no
+ * comment, no gate), the owner reads the result and judges it, and their value is
+ * being ready before you open the PR — a brief that arrives late has already lost
+ * most of its point. The verdict/gate/executor path deliberately does NOT use
+ * this: it decides what gets pushed to a real PR, so it keeps full reasoning.
+ */
+export const ARTIFACT_EFFORT = "low" as const;
+
+/**
+ * Reasoning effort for the DECIDING agents — the Verdict, the plan pass, and the
+ * fix agent that authors a diff.
+ *
+ * Deliberately a step above `ARTIFACT_EFFORT`, and deliberately not `high`. These
+ * runs produce the bytes that get pushed to a real PR, so they are the last place
+ * to economise; but `high` is also not a free choice — one measured Verdict run
+ * spent 589s and 86,956 output tokens across 93 turns, and that run is the second
+ * largest contributor to a Thread's wall clock after queue wait.
+ *
+ * `medium` keeps adaptive thinking on (it is the grounding these decisions rest
+ * on) while cutting the per-turn latency that made a Thread take an hour. Nothing
+ * downstream is relaxed to pay for it: the gate still verifies every diff, and a
+ * change still parks at `awaiting_approval` for the owner. If Verdict quality
+ * visibly regresses, this constant is the one thing to raise — before touching any
+ * guardrail.
+ */
+export const DECISION_EFFORT = "medium" as const;
+
 export async function sdkEnv(modelName?: string): Promise<{
   env: Record<string, string>;
   modelArn: string;

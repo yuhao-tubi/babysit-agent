@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { loadConfig, sdkEnv } from "./config.js";
-import { isMaxTurnsError } from "./sdk.js";
+import { agentGuardHooks, worktreeBriefing } from "./agent-guard.js";
+import { DECISION_EFFORT, loadConfig, sdkEnv } from "./config.js";
+import { isMaxTurnsError, RunTrace } from "./sdk.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { materializeCiLog } from "./ci.js";
 import { preTriage } from "./triage.js";
@@ -11,7 +12,9 @@ import { getPrHead, getPrBody } from "./gh.js";
 
 const CI_VERDICT_SYSTEM = `You triage a FAILING CI CHECK on a pull request. You work in a read-only checkout of the PR branch. The failing check's full log has been written to a file on disk. Never guess.
 
-Work efficiently — you have a limited number of turns. The log can be very large, so do NOT read it top-to-bottom: GREP it first for the failure (e.g. patterns like "FAIL ", "● ", "✕", "Error:", "AssertionError", "Expected", "##[error]", "exit code"), then read only the few matching regions and the specific source files they point to. Decide as soon as you have enough evidence; don't keep exploring once the failure and fix (or non-fix) are clear.
+Work efficiently — you have a limited number of turns (the prompt states how many). The log can be very large, so do NOT read it top-to-bottom: GREP it first for the failure (e.g. patterns like "FAIL ", "● ", "✕", "Error:", "AssertionError", "Expected", "##[error]", "exit code"), then read only the few matching regions and the specific source files they point to. Decide as soon as you have enough evidence; don't keep exploring once the failure and fix (or non-fix) are clear.
+
+You are the TRIAGE step, NOT the implementer: never write or draft the patch — "propose" hands the fix to a separate agent with its own budget. And if you are running low on turns, stop investigating and emit the JSON block immediately (escalate if unsure): a run that ends without the block decides nothing and is escalated to the owner unanswered.
 
 You MUST end your response with a single fenced JSON block (\`\`\`json ... \`\`\`) and nothing after it, matching:
 {
@@ -35,6 +38,11 @@ Set risk:"high" for anything touching security or correctness.
 Citing code: embed file/line references as GitHub permalinks using the provided blob base URL: <base>/<path>#L<line>.`;
 
 const VERDICT_SYSTEM = `You triage code-review feedback on a pull request. You work in a read-only checkout of the PR branch. Investigate the actual code before deciding — never guess.
+
+Budget discipline — you have a LIMITED number of turns (the prompt states how many), and a run that ENDS WITHOUT the JSON block is a total loss: it decides nothing, and the thread is escalated to the owner unanswered. So:
+- You are the TRIAGE step, NOT the implementer. NEVER write, edit or draft the fix. Choosing "propose" hands the change to a separate fix agent with its own budget, so once you know a change is needed, describe it in one sentence and emit the verdict — do not start reading files to build the patch.
+- Decide as soon as the evidence is sufficient. Read the cited code and what it directly depends on; do not audit the repo. When a claim is about "every other call site" or "all the other implementations", two or three representative ones are enough evidence — exhaustive enumeration is not required, and a wide grep sweep across a large monorepo will exhaust the budget before you conclude.
+- If you are running low on turns, STOP investigating and emit the JSON block immediately with your best decision (escalate if you are still unsure). A verdict on partial evidence beats no verdict at all.
 
 You MUST end your response with a single fenced JSON block (\`\`\`json ... \`\`\`) and nothing after it, matching:
 {
@@ -70,8 +78,20 @@ Set risk:"high" for anything touching security or correctness — a high-risk ch
 
 Citing code: whenever you reference a specific file/line to explain or justify something (in summary or reply_draft), embed it as a GitHub permalink instead of a bare path:line. The prompt gives you a repo blob base URL pinned to the PR head commit; build links as \`<base>/<path>#L<line>\` (or \`#L<start>-L<end>\` for a range), and render them as markdown, e.g. \`[\`html5.ts:2726\`](<base>/packages/player/src/adapters/html5.ts#L2726)\`. Keep the visible text as the human-readable \`file:line\` so it stays readable, but make it a clickable link.`;
 
-function buildPrompt(s: ThreadRow, items: FeedbackItem[], blobBase: string, prBody: string): string {
+function buildPrompt(
+  s: ThreadRow,
+  items: FeedbackItem[],
+  blobBase: string,
+  prBody: string,
+  dir: string,
+  maxTurns: number
+): string {
   const lines: string[] = [];
+  // Where you are, first line — see worktreeBriefing.
+  lines.push(worktreeBriefing(dir));
+  lines.push("");
+  lines.push(turnBudgetBriefing(maxTurns));
+  lines.push("");
   lines.push(`PR: ${s.prKey}`);
   lines.push(`Comment author_class: ${s.authorClass}`);
   lines.push(`Review/thread: ${s.threadKey}`);
@@ -98,14 +118,38 @@ function buildPrompt(s: ThreadRow, items: FeedbackItem[], blobBase: string, prBo
   return lines.join("\n");
 }
 
+/**
+ * The turn budget, told to the MODEL. The SDK enforces `maxTurns` but never
+ * mentions it, so the agent cannot pace itself: one observed run confirmed the
+ * bot's claim after ~65 greps across a monorepo and then, on its last turn,
+ * started implementing the fix (not its job) instead of emitting the verdict —
+ * the cap hit mid-read and the whole run decided nothing.
+ */
+function turnBudgetBriefing(maxTurns: number): string {
+  return [
+    `Turn budget for this run: ${maxTurns} turns.`,
+    `  The JSON verdict block is the ONLY output that counts: if the budget runs out`,
+    `  before you emit it, the entire run is discarded and the thread is escalated to`,
+    `  the owner unanswered. Pace yourself against that number and emit the block`,
+    `  while you still have turns left — escalate if you are not yet sure.`,
+  ].join("\n");
+}
+
 function buildCiPrompt(
   s: ThreadRow,
   items: FeedbackItem[],
   blobBase: string,
-  logPath: string
+  logPath: string,
+  dir: string,
+  maxTurns: number
 ): string {
   const it = items[0];
   const lines: string[] = [];
+  // Where you are, first line — see worktreeBriefing.
+  lines.push(worktreeBriefing(dir));
+  lines.push("");
+  lines.push(turnBudgetBriefing(maxTurns));
+  lines.push("");
   lines.push(`PR: ${s.prKey}`);
   lines.push(`Failing check: ${it?.checkName ?? s.threadKey}  (class: ${it?.ciClass ?? "unknown"})`);
   lines.push(`Repo blob base URL (pinned to PR head): ${blobBase}`);
@@ -321,36 +365,42 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
     // and that text is the only place it survives a non-success run.
     let last = "";
     let assistantText = "";
-    let endSubtype = "";
     const { env, modelArn } = await sdkEnv();
     const cfg = loadConfig();
+    const maxTurns = isCi ? cfg.verdictCiMaxTurns : cfg.verdictMaxTurns;
+    // Records turns / transcript path / stderr / blocked scans for ONE line of
+    // audit trail per run — without it a max-turns failure leaves no trace of
+    // what the agent actually spent its budget on. See RunTrace.
+    const trace = new RunTrace(dir);
     try {
       for await (const msg of query({
         prompt: isCi
-          ? buildCiPrompt(s, items, blobBase, ciLogPath as string)
-          : buildPrompt(s, items, blobBase, prBody),
+          ? buildCiPrompt(s, items, blobBase, ciLogPath as string, dir, maxTurns)
+          : buildPrompt(s, items, blobBase, prBody, dir, maxTurns),
         options: {
           cwd: dir,
           model: modelArn,
           systemPrompt: isCi ? CI_VERDICT_SYSTEM : VERDICT_SYSTEM,
           permissionMode: "dontAsk",
           allowedTools: ["Read", "Grep", "Glob", "Bash"],
+          effort: DECISION_EFFORT,
+          ...agentGuardHooks(dir, trace.deny),
           settingSources: [],
           env,
           // A CI failure means reading a large failing-check log AND investigating
           // source before deciding — that needs materially more turns than a
           // review-comment triage, which is usually localized to a few files.
-          maxTurns: isCi ? cfg.verdictCiMaxTurns : cfg.verdictMaxTurns,
-          stderr: () => {},
+          maxTurns,
+          stderr: trace.stderr,
         },
       })) {
+        trace.note(msg);
         if (msg.type === "assistant") {
           for (const block of msg.message.content) {
             if (block.type === "text") assistantText += block.text;
           }
-        } else if (msg.type === "result") {
-          endSubtype = msg.subtype;
-          if (msg.subtype === "success") last = msg.result;
+        } else if (msg.type === "result" && msg.subtype === "success") {
+          last = msg.result;
         }
       }
     } catch (err) {
@@ -361,8 +411,12 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
       // already contains the verdict block, and if it doesn't we degrade to a
       // safe escalate. Any OTHER error is a real fault → recoverable `error`.
       if (!isMaxTurnsError(err)) throw err;
-      endSubtype = endSubtype || "error_max_turns";
+      trace.setEnd("error_max_turns");
     }
+    // Always recorded, not just on failure: the turn counts of runs that SUCCEED
+    // are how you tell a budget that is too small from a prompt that wanders.
+    logEvent(s.id, "verdict_run", trace.describe());
+    const endSubtype = trace.endSubtype;
     // Prefer the clean success result; otherwise fall back to whatever the agent
     // streamed (a max-turns run that still emitted the verdict block).
     const text = last || assistantText;

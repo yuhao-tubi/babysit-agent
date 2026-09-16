@@ -1,5 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { loadConfig, sdkEnv } from "./config.js";
+import { agentGuardHooks } from "./agent-guard.js";
+import { DECISION_EFFORT, loadConfig, sdkEnv } from "./config.js";
 import {
   addWorktree,
   removeWorktree,
@@ -25,6 +26,7 @@ import { emit } from "./events.js";
 import { materializeCiLog } from "./ci.js";
 import { isMaxTurnsError } from "./sdk.js";
 import { markAgentAuthored } from "./classify.js";
+import { withGateLock } from "./queue.js";
 import type { FeedbackItem, Proposal, ThreadRow, Verdict } from "./types.js";
 
 /** Whether this thread's class may push without owner approval (and not high-risk). */
@@ -377,12 +379,16 @@ async function proposeCode(
       // (build / unit test) in addition to the typecheck+lint floor (Q9b/Q22).
       // Non-CI (owner-reviewed) proposals use the light gate: verify the diff
       // (incremental typecheck + lint on changed files) instead of the whole repo.
-      const gate = await runGate(
-        dir,
-        s.repo,
-        isCi
-          ? { ciClass, testTarget: verdict.ci_test_target }
-          : { light: true, changedFiles: changedFiles(diff), branchFiles }
+      // One gate per repo at a time (withGateLock), independent of how wide
+      // repoQueue is: the gate is the resource-heavy step, agent runs are not.
+      const gate = await withGateLock(`${s.owner}/${s.repo}`, () =>
+        runGate(
+          dir,
+          s.repo,
+          isCi
+            ? { ciClass, testTarget: verdict.ci_test_target }
+            : { light: true, changedFiles: changedFiles(diff), branchFiles }
+        )
       );
       logEvent(s.id, "gate", gate.detail.slice(0, 1000));
       if (gate.ran && gate.passed) break;
@@ -640,19 +646,22 @@ export async function approveProposal(s: ThreadRow): Promise<ThreadRow["status"]
     const isCi = s.authorClass === "ci";
     const ciClass = items.find((i) => i.ciClass)?.ciClass;
     const verdict: Verdict | null = s.verdictJson ? JSON.parse(s.verdictJson) : null;
-    const gate = await runGate(
-      dir,
-      s.repo,
-      isCi
-        ? { ciClass, testTarget: verdict?.ci_test_target }
-        : {
-            light: true,
-            changedFiles: changedFiles(landed.diff),
-            // Same stale-seeded-artifact rebuild as the propose path. Unaffected by
-            // the applied patch: the three-dot diff reads committed HEAD, and the
-            // landed patch is still only in the working tree.
-            branchFiles: await branchChangedFiles(dir),
-          }
+    // One gate per repo at a time — see withGateLock.
+    const gate = await withGateLock(`${s.owner}/${s.repo}`, async () =>
+      runGate(
+        dir,
+        s.repo,
+        isCi
+          ? { ciClass, testTarget: verdict?.ci_test_target }
+          : {
+              light: true,
+              changedFiles: changedFiles(landed.diff),
+              // Same stale-seeded-artifact rebuild as the propose path. Unaffected
+              // by the applied patch: the three-dot diff reads committed HEAD, and
+              // the landed patch is still only in the working tree.
+              branchFiles: await branchChangedFiles(dir),
+            }
+      )
     );
     logEvent(s.id, "gate", `re-gate on approve: ${gate.detail.slice(0, 1000)}`);
     if (!gate.ran) {
@@ -788,6 +797,8 @@ async function runPlanAgent(dir: string, prompt: string): Promise<string> {
         systemPrompt: PLAN_SYSTEM,
         permissionMode: "dontAsk",
         allowedTools: ["Read", "Grep", "Glob", "Bash"],
+        effort: DECISION_EFFORT,
+        ...agentGuardHooks(dir),
         settingSources: [],
         env,
         // Read-only investigation of a large change needs headroom; the brief is
@@ -854,6 +865,8 @@ async function runFixAgent(dir: string, prompt: string): Promise<string> {
       systemPrompt: FIX_SYSTEM,
       permissionMode: "acceptEdits",
       allowedTools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+      effort: DECISION_EFFORT,
+      ...agentGuardHooks(dir),
       settingSources: [],
       env,
       maxTurns: 40,

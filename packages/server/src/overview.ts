@@ -1,7 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { agentGuardHooks } from "./agent-guard.js";
 import { readFileSync, existsSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, sdkEnv } from "./config.js";
+import { ARTIFACT_EFFORT, loadConfig, sdkEnv } from "./config.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { getPrHead } from "./gh.js";
 import {
@@ -173,6 +174,8 @@ async function runOverviewAgent(opts: {
       // Write lets the agent author `.svg` + overview.json in the ephemeral
       // worktree. It has NO gh/push tool — GitHub stays untouched.
       allowedTools: ["Read", "Grep", "Glob", "Bash", "Write"],
+      effort: ARTIFACT_EFFORT,
+      ...agentGuardHooks(opts.dir, (d) => opts.trace({ type: "guard", text: d })),
       settingSources: [],
       env: opts.env,
       maxTurns: opts.maxTurns,
@@ -277,7 +280,7 @@ export async function generateOverview(prKey: string): Promise<OverviewResult> {
   });
   try {
     // Reviewer overviews are read-only, reviewer-facing artifacts → sonnet for
-    // speed. Author overviews stay on the default (opus). See OverviewConfig.
+    // speed. Author overviews stay on the default model. See OverviewConfig.
     const { env, modelArn } = await sdkEnv(
       pr.role === "reviewer" ? cfg.overview.reviewerModelName : undefined
     );
@@ -447,6 +450,8 @@ export async function answerQuestion(prKey: string, question: string): Promise<A
         systemPrompt: QA_SYSTEM,
         permissionMode: "dontAsk",
         allowedTools: ["Read", "Grep", "Glob", "Bash"],
+        effort: ARTIFACT_EFFORT,
+        ...agentGuardHooks(dir),
         settingSources: [],
         env,
         maxTurns: cfg.overview.maxTurns,

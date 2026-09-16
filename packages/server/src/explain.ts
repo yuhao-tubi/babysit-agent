@@ -1,7 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { agentGuardHooks } from "./agent-guard.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, sdkEnv } from "./config.js";
+import { ARTIFACT_EFFORT, loadConfig, sdkEnv } from "./config.js";
 import { isIgnoredRepo } from "./classify.js";
 import { getPrHead } from "./gh.js";
 import { getThread, getThreadItems, isPrExpired, logEvent, updateThread } from "./db.js";
@@ -206,7 +207,7 @@ export async function generateExplanation(
 
   const head = await getPrHead(s.owner, s.repo, s.number);
   const blobBase = `https://github.com/${s.owner}/${s.repo}/blob/${head.headSha}`;
-  // Author-facing reasoning about the owner's own PR → the default (opus), like
+  // Author-facing reasoning about the owner's own PR → the default model, like
   // author Blind spots. The faster `reviewerModelName` is for reviewer artifacts.
   const { env, modelArn } = await sdkEnv();
 
@@ -237,6 +238,8 @@ export async function generateExplanation(
         // GitHub: the worktree is a throwaway that `finally` deletes, and this
         // module has no push/comment path (unlike the executor).
         allowedTools: ["Read", "Grep", "Glob", "Bash", "Write"],
+        effort: ARTIFACT_EFFORT,
+        ...agentGuardHooks(dir),
         settingSources: [],
         env,
         maxTurns: cfg.explain.maxTurns,

@@ -26,9 +26,41 @@ import {
 import { notifyEscalation } from "./notify.js";
 import { onEvent, emit } from "./events.js";
 import { repoQueue } from "./queue.js";
+import { claimRun, releaseRun } from "./running.js";
 import type { ThreadRow } from "./types.js";
 
 const queue = repoQueue;
+
+/**
+ * Enqueue Thread work, holding the Thread's run claim for exactly as long as the
+ * job actually executes.
+ *
+ * Every queued closure below goes through this rather than `queue.run` directly,
+ * for two reasons (see running.ts):
+ *
+ *  - It is the double-run guard. The `status !== "pending"` re-check inside these
+ *    closures is not sufficient on its own — there is an `await` between reading
+ *    the status and writing `in_progress`, and today only the serial queue keeps
+ *    two copies of one Thread from interleaving there. The claim is synchronous,
+ *    so it holds no matter how wide the queue gets.
+ *  - It is what makes RUNNING observable. The claim is taken inside the closure,
+ *    where work genuinely starts — so a Thread sitting in the queue with
+ *    `status: "in_progress"` (which `approveThread` sets before enqueueing, on
+ *    purpose) is correctly reported as queued, not running.
+ *
+ * A refused claim returns without doing any work: something is already running for
+ * this Thread, and it will settle the Thread itself.
+ */
+function runClaimed(repoKey: string, id: number, job: () => Promise<void>): Promise<void> {
+  return queue.run(repoKey, async () => {
+    if (!claimRun(id)) return;
+    try {
+      await job();
+    } finally {
+      releaseRun(id);
+    }
+  });
+}
 
 /** Process one pending thread: re-check resolution → verdict → loop-guard → execute. */
 export async function processThread(id: number): Promise<void> {
@@ -66,7 +98,7 @@ export async function processThread(id: number): Promise<void> {
     }
   }
 
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
+  await runClaimed(`${s.owner}/${s.repo}`, id, async () => {
     const fresh = getThread(id);
     if (!fresh || fresh.status !== "pending") return;
 
@@ -146,7 +178,7 @@ export async function applyInstruction(id: number, instruction: string): Promise
   // what keeps it from looking dead while queued.
   updateThread(id, { status: "in_progress", error: null });
   emit({ type: "thread_updated", threadId: id });
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
+  await runClaimed(`${s.owner}/${s.repo}`, id, async () => {
     const fresh = getThread(id);
     if (!fresh) return;
     try {
@@ -210,7 +242,7 @@ async function applyFrozenProposal(id: number, owner: string, repo: string): Pro
   // A box, not a plain `let`: the assignment happens inside the queued closure, which
   // control-flow analysis can't see.
   const box: { stale: StaleProposal | null } = { stale: null };
-  await queue.run(`${owner}/${repo}`, async () => {
+  await runClaimed(`${owner}/${repo}`, id, async () => {
     const fresh = getThread(id);
     if (!fresh || !fresh.proposalJson) return;
     try {
@@ -262,7 +294,7 @@ export async function approveReply(id: number): Promise<void> {
   updateThread(id, { status: "in_progress", error: null });
   logEvent(id, "approve", "owner approved the reply");
   emit({ type: "thread_updated", threadId: id });
-  await queue.run(`${s.owner}/${s.repo}`, async () => {
+  await runClaimed(`${s.owner}/${s.repo}`, id, async () => {
     const fresh = getThread(id);
     if (!fresh || !fresh.proposalJson) return;
     try {

@@ -1,7 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { agentGuardHooks } from "./agent-guard.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, sdkEnv } from "./config.js";
+import { ARTIFACT_EFFORT, loadConfig, sdkEnv } from "./config.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { getPrHead } from "./gh.js";
 import { getPrOverview, updatePrOverview, logEvent } from "./db.js";
@@ -151,6 +152,8 @@ export async function generateQuiz(prKey: string): Promise<QuizResult> {
         // Write lets the agent author quiz.json in the ephemeral worktree; it has
         // NO gh/push tool — GitHub stays untouched.
         allowedTools: ["Read", "Grep", "Glob", "Bash", "Write"],
+        effort: ARTIFACT_EFFORT,
+        ...agentGuardHooks(dir),
         settingSources: [],
         env,
         maxTurns: cfg.overview.maxTurns,

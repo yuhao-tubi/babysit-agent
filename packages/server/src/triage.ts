@@ -108,7 +108,9 @@ export async function preTriage(items: FeedbackItem[], authorClass: AuthorClass)
       system: TRIAGE_SYSTEM,
       prompt: buildTriagePrompt(items, authorClass),
       maxTokens: 300,
-      temperature: 0,
+      // No `temperature: 0` — current models reject sampling params outright
+      // (see InvokeModelInput). The strict output contract in TRIAGE_SYSTEM plus
+      // the fail-open parse below are what keep this decision tight.
       // Short cap: this runs INSIDE the per-repo SerialQueue, and the whole point
       // is to be quick. A slow answer is worth less than falling through.
       timeoutMs: 20_000,

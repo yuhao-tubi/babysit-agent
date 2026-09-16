@@ -148,6 +148,19 @@ export interface InvokeModelInput {
   /** The single user message. */
   prompt: string;
   maxTokens: number;
+  /**
+   * Sampling temperature — sent ONLY when given, and current models reject it.
+   * Sonnet 5 / Opus 5 and the 4.6+ family removed the sampling parameters
+   * (`temperature`/`top_p`/`top_k`) and answer a request carrying one with
+   * `400 "temperature is deprecated for this model"`. Since `invokeModel` is the
+   * whole surface for the tool-less paths (AI-refine, the Verdict pre-triage),
+   * defaulting it meant BOTH of them 400'd on every call the moment the
+   * configured model moved forward — silently, because the pre-triage is
+   * fail-open and refine's failure only shows as a dead button.
+   *
+   * So: no default. Leave it unset unless a caller has pinned a model old enough
+   * to accept it. Determinism now comes from the prompt, not from `temperature: 0`.
+   */
   temperature?: number;
   /** Friendly model name; omit for the default (`bedrockModelName`). */
   modelName?: string;
@@ -185,7 +198,8 @@ export async function invokeModel(input: InvokeModelInput): Promise<string> {
       body: JSON.stringify({
         anthropic_version: "bedrock-2023-05-31",
         max_tokens: input.maxTokens,
-        temperature: input.temperature ?? 0.3,
+        // Omitted unless a caller explicitly asks for it — see InvokeModelInput.
+        ...(input.temperature === undefined ? {} : { temperature: input.temperature }),
         system: input.system,
         messages: [{ role: "user", content: input.prompt }],
       }),

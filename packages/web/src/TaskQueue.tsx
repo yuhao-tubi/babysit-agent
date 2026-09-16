@@ -23,8 +23,14 @@ function queueFromPrs(prs: PrGroup[]): { running: QueuedTask[]; pending: QueuedT
     if (pr.expiredAt) continue;
     for (const t of pr.threads) {
       const task = { ...t, prKey: pr.prKey };
-      if (t.status === "in_progress") running.push(task);
-      else if (t.status === "pending") pending.push(task);
+      // `running` (a live claim on the daemon) — NOT `status === "in_progress"`.
+      // The status flips when the owner's click is accepted, which happens before
+      // the job reaches the front of the per-repo queue; keying the spinner off it
+      // showed several Threads "Running 16m" while only one had an agent. A
+      // claimed-but-queued Thread belongs in the queued bucket, where its wait is
+      // legible as a wait.
+      if (t.running) running.push(task);
+      else if (t.status === "pending" || t.status === "in_progress") pending.push(task);
     }
   }
   // Most-recently-touched first within each bucket.

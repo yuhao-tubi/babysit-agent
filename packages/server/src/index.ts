@@ -12,6 +12,7 @@ import { recoverInterrupted, startProcessor } from "./processor.js";
 import { startServer } from "./api.js";
 import { sweepWorktrees } from "./worktrees.js";
 import { acquireInstanceLock } from "./singleton.js";
+import { excludeFromSpotlight, spotlightExcludeRoots } from "./spotlight.js";
 
 async function main() {
   const cfg = loadConfig();
@@ -19,6 +20,11 @@ async function main() {
   // Two daemons race on the same base clones' `.git` (withBaseLock is only an
   // in-process mutex) and are two writers/actors on state.db and GitHub.
   acquireInstanceLock(`${cfg.dbPath}.daemon.lock`);
+  // Before anything writes to disk: keep Spotlight out of the churn (see
+  // spotlight.ts — an indexing storm over throwaway worktrees starves the
+  // daemon's own agent runs and drags the owner's whole machine).
+  const marked = excludeFromSpotlight(spotlightExcludeRoots(cfg));
+  if (marked.length) console.log(`[babysit] excluded ${marked.length} path(s) from Spotlight`);
   getDb(); // init + migrate
   console.log(
     `[babysit] starting — login=${cfg.githubLogin} dryRun=${cfg.dryRun} poll=${cfg.pollIntervalMs}ms`

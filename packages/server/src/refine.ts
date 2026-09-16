@@ -52,7 +52,6 @@ export async function refineText(input: RefineInput): Promise<string> {
       system: REFINE_SYSTEM,
       prompt: parts.join("\n"),
       maxTokens: 1024,
-      temperature: 0.3,
       label: "refine",
     })
   ).trim();
