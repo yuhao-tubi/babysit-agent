@@ -65,6 +65,7 @@ export class RunTrace {
   private sessionId = "";
   private ended = "";
   private denials = 0;
+  private repeats = 0;
   private stderrTail: string[] = [];
 
   constructor(private readonly cwd: string) {}
@@ -90,9 +91,15 @@ export class RunTrace {
     }
   };
 
-  /** Pass as `agentGuardHooks`' `onDeny` so a blocked filesystem scan is visible. */
-  deny = (): void => {
-    this.denials++;
+  /**
+   * Pass as `agentGuardHooks`' `onDeny` so a blocked call is visible. The two
+   * guardrails are counted apart because they mean different things when you are
+   * sizing a budget: a blocked scan is an agent that got lost, a blocked repeat
+   * is an agent that was looping (see `agent-guard.ts`).
+   */
+  deny = (detail = ""): void => {
+    if (detail.startsWith("blocked repeat")) this.repeats++;
+    else this.denials++;
   };
 
   /** How the run ended, once known. Empty until a `result` message or `setEnd`. */
@@ -112,6 +119,7 @@ export class RunTrace {
   describe(): string {
     const parts = [`turns=${this.turns}`, `end=${this.ended || "no result"}`];
     if (this.denials > 0) parts.push(`blocked_scans=${this.denials}`);
+    if (this.repeats > 0) parts.push(`blocked_repeats=${this.repeats}`);
     if (this.sessionId) parts.push(`transcript=${transcriptPath(this.cwd, this.sessionId)}`);
     if (this.stderrTail.length > 0) parts.push(`stderr: ${this.stderrTail.join(" ⏎ ")}`);
     return parts.join(" ");
