@@ -2,7 +2,7 @@ import { loadConfig } from "./config.js";
 import {
   collectFeedback,
   compareCommits,
-  getPrHead,
+  getPrSnapshot,
   listAuthoredPrs,
   listReviewRequestedPrs,
 } from "./gh.js";
@@ -78,7 +78,7 @@ export async function pollOnce(): Promise<PollResult> {
     if (isIgnoredRepo(pr.owner, pr.repo)) continue;
     if (authoredKeys.has(prKey)) continue; // authored set wins
     try {
-      const head = await getPrHead(pr.owner, pr.repo, pr.number);
+      const head = await getPrSnapshot(pr.owner, pr.repo, pr.number);
       upsertPr({
         prKey,
         owner: pr.owner,
@@ -89,6 +89,10 @@ export async function pollOnce(): Promise<PollResult> {
         headRef: head.headRefName,
         headSha: head.headSha,
         role: "reviewer",
+        baseRef: head.baseRefName,
+        reviewDecision: head.reviewDecision,
+        approvalCount: head.approvalCount,
+        checks: head.checks,
       });
     } catch (err: any) {
       logEvent(null, "poll_error", `${prKey} (reviewer): ${err?.message ?? err}`);
@@ -100,7 +104,7 @@ export async function pollOnce(): Promise<PollResult> {
     checked++;
     const prKey = `${pr.owner}/${pr.repo}#${pr.number}`;
     try {
-      const head = await getPrHead(pr.owner, pr.repo, pr.number);
+      const head = await getPrSnapshot(pr.owner, pr.repo, pr.number);
       upsertPr({
         prKey,
         owner: pr.owner,
@@ -110,6 +114,10 @@ export async function pollOnce(): Promise<PollResult> {
         url: pr.url,
         headRef: head.headRefName,
         headSha: head.headSha,
+        baseRef: head.baseRefName,
+        reviewDecision: head.reviewDecision,
+        approvalCount: head.approvalCount,
+        checks: head.checks,
       });
 
       const fb = await collectFeedback(pr.owner, pr.repo, pr.number, {

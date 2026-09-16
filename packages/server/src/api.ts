@@ -11,6 +11,7 @@ import {
   listPrsWithThreads,
   listReviewerPrs,
   listExpiredPrsPage,
+  listLivePrs,
   type PrRow,
   lastPollTime,
   getPrOverview,
@@ -36,13 +37,35 @@ import { pollOnce } from "./poller.js";
 import { refineText } from "./refine.js";
 import { onEvent, emit } from "./events.js";
 import { loadConfig } from "./config.js";
+import { isRunning } from "./running.js";
+import { buildStacks, type StackInfo } from "./stacks.js";
 import type { ThreadStatus } from "./types.js";
+
+/** Branch topology of every live PR — the input to Stack detection. */
+function livePrStackInputs() {
+  return listLivePrs().map((p) => ({
+    prKey: p.prKey,
+    owner: p.owner,
+    repo: p.repo,
+    number: p.number,
+    headRef: p.headRef,
+    baseRef: p.baseRef,
+  }));
+}
 
 function threadView(id: number) {
   const s = getThread(id);
   if (!s) return null;
+  const stack = buildStacks(livePrStackInputs()).get(s.prKey) ?? null;
   return {
     ...s,
+    // The PR's title, so the detail page can lead with what the PR IS rather than
+    // with `owner/repo#number` (the key stays as a subtitle — two repos can both
+    // have a #4021, and the key is how you match the page to the sidebar).
+    prTitle: getPrOverview(s.prKey)?.title ?? null,
+    // Where this PR sits in its Stack (null when standalone) — answers "why is
+    // this diff sitting on unmerged code".
+    stack,
     verdict: s.verdictJson ? JSON.parse(s.verdictJson) : null,
     proposal: s.proposalJson ? JSON.parse(s.proposalJson) : null,
     newCommits: s.newCommitsJson ? JSON.parse(s.newCommitsJson) : null,
@@ -54,6 +77,14 @@ function threadView(id: number) {
       !!s.explanationMd &&
       !!s.explanationHeadSha &&
       s.explanationHeadSha !== prHeadSha(s.prKey),
+    // Same distinction the PR list makes: a job is EXECUTING for this Thread, as
+    // opposed to `status === "in_progress"`, which also covers a Thread that has
+    // been claimed but is still waiting its turn on the repo queue. The detail
+    // page needs it for the same reason the list does — a Thread can sit
+    // `in_progress` for an hour behind other work on the same repo, and calling
+    // that "in flight" tells the owner their click is being worked on when it is
+    // merely accepted.
+    running: isRunning(id),
     items: getThreadItems(id),
     events: getEvents(id),
   };
@@ -99,7 +130,11 @@ export async function startServer(port: number): Promise<void> {
   // Build the PR-group shape (status/counts/threads) the dashboard renders. Takes
   // a pre-fetched thread list so a caller can fetch `listThreads()` once and reuse
   // it across a page of PRs rather than re-querying per row.
-  const toGroup = (p: PrRow, threads: ReturnType<typeof listThreads>) => {
+  const toGroup = (
+    p: PrRow,
+    threads: ReturnType<typeof listThreads>,
+    stacks: Map<string, StackInfo>
+  ) => {
     // Stable, deterministic Thread order: needs-you first (blocked > awaiting
     // approval > ongoing > resolved), then by Thread id so rows never reshuffle
     // between SSE-driven refreshes (`updatedAt` alone made them jump around).
@@ -122,6 +157,16 @@ export async function startServer(port: number): Promise<void> {
       counts,
       lastPolled: p.lastPolled,
       expiredAt: p.expiredAt,
+      // GitHub-side state as of the last poll — display only (see CONTEXT.md).
+      // `approvalCount` is people, and there is deliberately no "of N": the
+      // required-approval count lives in branch protection, which our token
+      // cannot read, so the row states what GitHub told us and nothing more.
+      baseRef: p.baseRef,
+      reviewDecision: p.reviewDecision,
+      approvalCount: p.approvalCount,
+      checks: p.checks,
+      // Position in its PR Stack, or null when the PR stands alone.
+      stack: stacks.get(p.prKey) ?? null,
       threads: ts.map((t) => ({
         id: t.id,
         status: t.status,
@@ -130,6 +175,15 @@ export async function startServer(port: number): Promise<void> {
         action: t.verdictJson ? JSON.parse(t.verdictJson).action : null,
         summary: t.verdictJson ? JSON.parse(t.verdictJson).summary : null,
         updatedAt: t.updatedAt,
+        // Whether a job is EXECUTING for this Thread right now — not the same
+        // question as `status === "in_progress"`, which also covers a Thread that
+        // has been claimed but is still waiting its turn on the repo queue
+        // (`approveThread` flips the status before enqueueing, deliberately). The
+        // dashboard needs the distinction: rendering every `in_progress` Thread as
+        // "Running" showed three spinners and "16m ago" while exactly one had an
+        // agent and the other two had executed nothing, which makes the queue
+        // depth unreadable and the daemon look hung when it is merely busy.
+        running: isRunning(t.id),
       })),
     };
   };
@@ -143,7 +197,10 @@ export async function startServer(port: number): Promise<void> {
     // threads). Reviewer rows render for the overview panel only.
     const authored = listPrsWithThreads();
     const reviewer = listReviewerPrs();
-    const out = [...authored, ...reviewer].map((p) => toGroup(p, threads));
+    // Stacks are derived from EVERY live PR, not just the rendered ones — a
+    // mid-stack PR with no Threads is still a link in the chain.
+    const stacks = buildStacks(livePrStackInputs());
+    const out = [...authored, ...reviewer].map((p) => toGroup(p, threads, stacks));
     // blocked PRs first, then awaiting approval, then ongoing, then resolved.
     // Reviewer PRs (no threads → "resolved" rollup) naturally sort last.
     // Tie-break on prKey so equal-status rows keep a fixed order across polls.
@@ -165,7 +222,10 @@ export async function startServer(port: number): Promise<void> {
       const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
       const rows = listExpiredPrsPage(page, pageSize);
       const threads = listThreads();
-      return { items: rows.map((p) => toGroup(p, threads)), page, pageSize };
+      // No Stack grouping in the Expired view: it's a flat, most-recently-merged
+      // -first history, and a chain there is mostly gone anyway.
+      const stacks = new Map<string, StackInfo>();
+      return { items: rows.map((p) => toGroup(p, threads, stacks)), page, pageSize };
     }
   );
 

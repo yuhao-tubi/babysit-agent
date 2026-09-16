@@ -5,11 +5,13 @@ import { loadConfig } from "./config.js";
 import type {
   AuthorClass,
   BranchAdvance,
+  ChecksSummary,
   DiagramSet,
   ExplanationStatus,
   FeedbackItem,
   Proposal,
   QuizQuestion,
+  ReviewDecision,
   RiskItem,
   ThreadRow,
   ThreadStatus,
@@ -196,6 +198,19 @@ function migrate(d: Database.Database): void {
   // separate "Expired" section of the dashboard and skipped by the pipeline.
   // Cleared (set NULL) again if the PR ever comes back into the open set.
   addPrCol("expired_at", "TEXT");
+  // GitHub-side PR state, refreshed every poll from the single `gh pr view` call
+  // (`getPrSnapshot`) — DISPLAY ONLY, never an input to verdict/gate/push.
+  // `base_ref` is a real column (not JSON) because Stack detection QUERIES it:
+  // a PR sits on top of another when its base equals that PR's head.
+  // `review_decision` ∈ APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED|NULL and
+  // `approval_count` is a count of PEOPLE whose latest review is an approval —
+  // never a "needs N more", since branch protection is unreadable by our token.
+  // `checks_json` is the ChecksSummary (failing check NAMES + pending/total): the
+  // names are what make the badge tooltip useful ("flaky e2e" vs "typecheck").
+  addPrCol("base_ref", "TEXT");
+  addPrCol("review_decision", "TEXT");
+  addPrCol("approval_count", "INTEGER");
+  addPrCol("checks_json", "TEXT");
 }
 
 function now(): string {
@@ -249,16 +264,41 @@ export function upsertPr(p: {
   headRef: string;
   headSha?: string;
   role?: PrRole;
+  /** Base branch — the link Stack detection follows. */
+  baseRef?: string | null;
+  reviewDecision?: ReviewDecision | null;
+  approvalCount?: number | null;
+  checks?: ChecksSummary | null;
 }): void {
   getDb()
     .prepare(
-      `INSERT INTO prs (pr_key, owner, repo, number, title, url, head_ref, head_sha, role, last_polled, expired_at)
-       VALUES (@prKey,@owner,@repo,@number,@title,@url,@headRef,@headSha,@role,@lastPolled,NULL)
+      `INSERT INTO prs (pr_key, owner, repo, number, title, url, head_ref, head_sha, role,
+                        base_ref, review_decision, approval_count, checks_json, last_polled, expired_at)
+       VALUES (@prKey,@owner,@repo,@number,@title,@url,@headRef,@headSha,@role,
+               @baseRef,@reviewDecision,@approvalCount,@checksJson,@lastPolled,NULL)
        ON CONFLICT(pr_key) DO UPDATE SET
          title=@title, url=@url, head_ref=@headRef, head_sha=@headSha, role=@role,
-         last_polled=@lastPolled, expired_at=NULL`
+         base_ref=@baseRef, review_decision=@reviewDecision, approval_count=@approvalCount,
+         checks_json=@checksJson, last_polled=@lastPolled, expired_at=NULL`
     )
-    .run({ headSha: null, role: "author", ...p, lastPolled: now() });
+    // Bound explicitly rather than by spreading `p`: `checks` is an object, and
+    // better-sqlite3 rejects both unbindable values and unknown named params.
+    .run({
+      prKey: p.prKey,
+      owner: p.owner,
+      repo: p.repo,
+      number: p.number,
+      title: p.title,
+      url: p.url,
+      headRef: p.headRef,
+      headSha: p.headSha ?? null,
+      role: p.role ?? "author",
+      baseRef: p.baseRef ?? null,
+      reviewDecision: p.reviewDecision ?? null,
+      approvalCount: p.approvalCount ?? null,
+      checksJson: p.checks ? JSON.stringify(p.checks) : null,
+      lastPolled: now(),
+    });
 }
 
 /**
@@ -540,6 +580,32 @@ export interface PrRow {
   lastPolled: string | null;
   /** Set when the PR left the live open set (merged/closed); null while open. */
   expiredAt: string | null;
+  /** Branch the PR head is on — one half of the Stack link. */
+  headRef: string;
+  /** Branch the PR targets; null on rows last polled before this existed. */
+  baseRef: string | null;
+  /** GitHub's review decision as of the last poll (null = none required/unknown). */
+  reviewDecision: ReviewDecision | null;
+  /** People whose latest review is an approval, as of the last poll. */
+  approvalCount: number;
+  /** Failing/pending check summary as of the last poll (null = never observed). */
+  checks: ChecksSummary | null;
+}
+
+/** The `prs` columns every PR-list query selects. */
+const PR_ROW_COLS =
+  "pr_key, owner, repo, number, title, url, role, last_polled, expired_at, " +
+  "head_ref, base_ref, review_decision, approval_count, checks_json";
+
+function parseChecks(json: string | null): ChecksSummary | null {
+  if (!json) return null;
+  try {
+    const v = JSON.parse(json);
+    if (!v || !Array.isArray(v.failing)) return null;
+    return { failing: v.failing, pending: v.pending ?? 0, total: v.total ?? 0 };
+  } catch {
+    return null;
+  }
 }
 
 function rowToPrRow(r: any): PrRow {
@@ -553,6 +619,11 @@ function rowToPrRow(r: any): PrRow {
     role: (r.role as PrRole) ?? "author",
     lastPolled: r.last_polled,
     expiredAt: r.expired_at ?? null,
+    headRef: r.head_ref,
+    baseRef: r.base_ref ?? null,
+    reviewDecision: (r.review_decision as ReviewDecision) ?? null,
+    approvalCount: r.approval_count ?? 0,
+    checks: parseChecks(r.checks_json ?? null),
   };
 }
 
@@ -563,7 +634,7 @@ function rowToPrRow(r: any): PrRow {
 export function listPrsWithThreads(): PrRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT p.pr_key, p.owner, p.repo, p.number, p.title, p.url, p.role, p.last_polled, p.expired_at
+      `SELECT ${PR_ROW_COLS}
        FROM prs p
        WHERE p.expired_at IS NULL
          AND EXISTS (SELECT 1 FROM threads t WHERE t.pr_key = p.pr_key)
@@ -581,7 +652,7 @@ export function listPrsWithThreads(): PrRow[] {
 export function listReviewerPrs(): PrRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
+      `SELECT ${PR_ROW_COLS}
        FROM prs WHERE role='reviewer' AND expired_at IS NULL ORDER BY last_polled DESC`
     )
     .all();
@@ -603,7 +674,7 @@ export function listAutoOverviewCandidates(limit: number): PrRow[] {
   if (limit <= 0) return [];
   const rows = getDb()
     .prepare(
-      `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
+      `SELECT ${PR_ROW_COLS}
        FROM prs
        WHERE role='reviewer' AND expired_at IS NULL
          AND (overview_status IS NULL OR overview_status='idle')
@@ -625,11 +696,26 @@ export function listAutoOverviewCandidates(limit: number): PrRow[] {
 export function listExpiredPrsPage(page: number, pageSize: number): PrRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT pr_key, owner, repo, number, title, url, role, last_polled, expired_at
+      `SELECT ${PR_ROW_COLS}
        FROM prs WHERE expired_at IS NOT NULL ORDER BY expired_at DESC
        LIMIT ? OFFSET ?`
     )
     .all(pageSize, (page - 1) * pageSize);
+  return rows.map(rowToPrRow);
+}
+
+/**
+ * EVERY still-open PR, whatever its role and whether or not it has Threads.
+ *
+ * This is the input to Stack detection, which needs the whole branch topology:
+ * a mid-stack PR that happens to have no review feedback is still a real link in
+ * the chain, and leaving it out would split one Stack into two. (The dashboard
+ * itself still only renders the PRs the sidebar queries return.)
+ */
+export function listLivePrs(): PrRow[] {
+  const rows = getDb()
+    .prepare(`SELECT ${PR_ROW_COLS} FROM prs WHERE expired_at IS NULL`)
+    .all();
   return rows.map(rowToPrRow);
 }
 

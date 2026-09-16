@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   App as AntApp,
   Badge,
@@ -23,6 +23,7 @@ import { RelativeTime } from "./RelativeTime";
 import { TaskQueue } from "./TaskQueue";
 import { OverviewPanel } from "./OverviewPanel";
 import { VscodeLink } from "./prLinks";
+import { PrGithubState } from "./prState";
 
 const { Sider, Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -254,22 +255,14 @@ export function App() {
                     >
                       {label} ({group.length})
                     </Text>
-                    <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                      {group.map((pr) => (
-                        <PrNode
-                          key={pr.prKey}
-                          pr={pr}
-                          selected={selected}
-                          selectedPr={selectedPr}
-                          onSelect={select}
-                          onSelectPr={selectPr}
-                          defaultOpen={
-                            (pr.role === "author" && pr.status !== "resolved") ||
-                            pr.prKey === linkedPr
-                          }
-                        />
-                      ))}
-                    </Space>
+                    <PrList
+                      prs={group}
+                      selected={selected}
+                      selectedPr={selectedPr}
+                      onSelect={select}
+                      onSelectPr={selectPr}
+                      linkedPr={linkedPr}
+                    />
                   </div>
                 );
               })}
@@ -412,6 +405,106 @@ function ExpiredList({
   );
 }
 
+/**
+ * The PR cards of one role section, with PR STACKS kept together.
+ *
+ * `prs` arrives in the API's urgency order (blocked first). A Stack takes the
+ * position of its most urgent member — the first member reached in that order is
+ * what emits the whole group — and INSIDE the group the order is always chain
+ * order (bottom → top, `stack.order`), never urgency. A chain with only one
+ * member visible here isn't worth a group header, so it renders as a plain card.
+ */
+function PrList({
+  prs,
+  selected,
+  selectedPr,
+  onSelect,
+  onSelectPr,
+  linkedPr,
+}: {
+  prs: PrGroup[];
+  selected: number | null;
+  selectedPr: string | null;
+  onSelect: (id: number) => void;
+  onSelectPr: (prKey: string) => void;
+  linkedPr: string | null;
+}) {
+  const members = new Map<string, PrGroup[]>();
+  for (const pr of prs) {
+    if (!pr.stack) continue;
+    const list = members.get(pr.stack.rootKey) ?? [];
+    list.push(pr);
+    members.set(pr.stack.rootKey, list);
+  }
+  for (const list of members.values()) {
+    list.sort((a, b) => a.stack!.order - b.stack!.order);
+  }
+
+  const node = (pr: PrGroup) => (
+    <PrNode
+      key={pr.prKey}
+      pr={pr}
+      selected={selected}
+      selectedPr={selectedPr}
+      onSelect={onSelect}
+      onSelectPr={onSelectPr}
+      defaultOpen={
+        (pr.role === "author" && pr.status !== "resolved") || pr.prKey === linkedPr
+      }
+    />
+  );
+
+  const emitted = new Set<string>();
+  const rows: ReactNode[] = [];
+  for (const pr of prs) {
+    const root = pr.stack?.rootKey;
+    const chain = root ? members.get(root)! : null;
+    if (!chain || chain.length < 2) {
+      rows.push(node(pr));
+      continue;
+    }
+    if (emitted.has(root!)) continue;
+    emitted.add(root!);
+    rows.push(
+      <div key={`stack:${root}`}>
+        <Text
+          type="secondary"
+          strong
+          style={{
+            fontSize: 10,
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+            display: "block",
+            marginBottom: 6,
+            paddingInlineStart: 2,
+          }}
+        >
+          Stack of {chain.length}
+          {chain[0].stack!.rootBaseRef ? ` · onto ${chain[0].stack!.rootBaseRef}` : ""}
+        </Text>
+        {/* A rail so the group is still readable once the header scrolls off. */}
+        <div
+          style={{
+            borderInlineStart: "2px solid #adc6ff",
+            paddingInlineStart: 8,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+          }}
+        >
+          {chain.map(node)}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Space direction="vertical" size={10} style={{ width: "100%" }}>
+      {rows}
+    </Space>
+  );
+}
+
 function PrNode({
   pr,
   selected,
@@ -459,6 +552,21 @@ function PrNode({
                 }}
               >
                 <Space size={6} style={{ minWidth: 0 }}>
+                  {/* Depth in the Stack, not a position: a stack can FORK, so two
+                      PRs can share a level and "2 of 4" would invent an order. */}
+                  {pr.stack && (
+                    <Tooltip
+                      title={
+                        pr.stack.parentPrKey
+                          ? `Stack level ${pr.stack.depth} — on top of ${pr.stack.parentPrKey}`
+                          : `Bottom of the stack — onto ${pr.stack.rootBaseRef}`
+                      }
+                    >
+                      <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
+                        L{pr.stack.depth}
+                      </Tag>
+                    </Tooltip>
+                  )}
                   <Text strong>{pr.prKey}</Text>
                   <a
                     href={pr.url}
@@ -505,7 +613,27 @@ function PrNode({
               >
                 {pr.title}
               </div>
-              {counts}
+              {/* Babysitter state (thread counts) on the left; GitHub's own state
+                  (approvals + checks) on the right. Two different sources of
+                  truth, kept visually apart. */}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                {counts}
+                <PrGithubState
+                  decision={pr.reviewDecision}
+                  approvals={pr.approvalCount}
+                  checks={pr.checks}
+                  prUrl={pr.url}
+                  lastPolled={pr.lastPolled}
+                  expiredAt={pr.expiredAt}
+                />
+              </div>
             </div>
           ),
           children: (

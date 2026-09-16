@@ -15,6 +15,45 @@ export interface ThreadSummary {
   action: string | null;
   summary: string | null;
   updatedAt: string;
+  /**
+   * A job is EXECUTING for this Thread right now. Distinct from
+   * `status === "in_progress"`, which also covers a claimed Thread still waiting
+   * its turn on the per-repo queue — so this is the only honest input for a
+   * "Running" indicator.
+   */
+  running: boolean;
+}
+
+/**
+ * GitHub's own review decision for a PR (null = none required/unknown). There is
+ * deliberately no "N of M approvals": the required count lives in branch
+ * protection, which the `gh` token cannot read — see CONTEXT.md.
+ */
+export type ReviewDecision = "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED";
+
+/** Failing/pending checks for a PR head, as of the last poll. */
+export interface ChecksSummary {
+  /** Names of checks that completed in a failure — shown in the badge tooltip. */
+  failing: string[];
+  /** Checks still queued or running. */
+  pending: number;
+  total: number;
+}
+
+/**
+ * A PR's position in its Stack — a chain of PRs where each one's base branch is
+ * the PR below it's head branch. Absent (null) for a standalone PR.
+ */
+export interface StackInfo {
+  /** prKey of the bottom PR — the group identity the sidebar groups on. */
+  rootKey: string;
+  /** Base branch the bottom of the chain targets (e.g. "master"). */
+  rootBaseRef: string;
+  /** 1-based distance from the bottom: the `L1`/`L2`/`L3` label. */
+  depth: number;
+  /** Position in the chain's depth-first walk — the render order. */
+  order: number;
+  parentPrKey: string | null;
 }
 
 /** A PR (the "Session") and its threads. */
@@ -31,6 +70,15 @@ export interface PrGroup {
   /** Set when the PR merged/closed since last poll; null while open. Expired PRs
    *  are retained (read-only history) and shown in their own dashboard section. */
   expiredAt: string | null;
+  /** Base branch of the PR (null on rows polled before it was recorded). */
+  baseRef: string | null;
+  reviewDecision: ReviewDecision | null;
+  /** People whose latest review is an approval. */
+  approvalCount: number;
+  /** Null when checks were never observed for this head. */
+  checks: ChecksSummary | null;
+  /** Position in its PR Stack; null when the PR stands alone. */
+  stack: StackInfo | null;
 }
 
 export type OverviewStatus = "idle" | "generating" | "ready" | "failed";
@@ -175,7 +223,17 @@ export interface BranchAdvance {
 export interface ThreadDetail {
   id: number;
   prKey: string;
+  /** The PR's title — the page leads with this, keeping `prKey` as the subtitle. */
+  prTitle: string | null;
+  /** Where this PR sits in its Stack; null when standalone. */
+  stack: StackInfo | null;
   status: ThreadStatus;
+  /**
+   * A job is EXECUTING for this Thread right now. `status === "in_progress"` also
+   * covers a claimed Thread still queued behind other work on the same repo, so
+   * this is what any "working on it" indicator must key off.
+   */
+  running: boolean;
   authorClass: "bot" | "human" | "ci";
   reviewId: number | null;
   threadKey: string;

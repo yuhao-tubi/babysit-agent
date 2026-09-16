@@ -268,8 +268,11 @@ export function ThreadDetailView({
     <Space direction="vertical" size={16} style={{ maxWidth: 900, width: "100%" }}>
       <Space style={{ width: "100%", justifyContent: "space-between" }} align="start">
         <div>
+          {/* Lead with WHAT the PR is; the key stays as a subtitle, since two
+              repos can both have a #4021 and it's how you match this page to the
+              sidebar. Falls back to the key on an older row with no title. */}
           <Title level={3} style={{ margin: 0 }}>
-            {detail.prKey}
+            {detail.prTitle ?? detail.prKey}
             {prUrl(detail.prKey) && (
               <a
                 href={prUrl(detail.prKey)!}
@@ -286,7 +289,32 @@ export function ThreadDetailView({
               style={{ marginInlineStart: 8, fontSize: 18 }}
             />
           </Title>
-          <Space size={8} style={{ marginTop: 4 }}>
+          <Space size={8} style={{ marginTop: 2, display: "flex" }} wrap>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              {detail.prKey}
+            </Text>
+            {/* Why this diff may be sitting on unmerged code. */}
+            {detail.stack && (
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                stack L{detail.stack.depth}
+                {detail.stack.parentPrKey ? (
+                  <>
+                    {" · on top of "}
+                    <a
+                      href={prUrl(detail.stack.parentPrKey) ?? undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {detail.stack.parentPrKey}
+                    </a>
+                  </>
+                ) : (
+                  ` · bottom, onto ${detail.stack.rootBaseRef}`
+                )}
+              </Text>
+            )}
+          </Space>
+          <Space size={8} style={{ marginTop: 4, display: "flex" }} wrap>
             <Text type="secondary">{detail.threadKey}</Text>
             <StatusTag status={detail.status} />
             <Tag>{detail.authorClass}</Tag>
@@ -452,10 +480,19 @@ export function ThreadDetailView({
               // HEAD → re-gate → push). Show it so the click is visibly registered
               // even while a long re-gate runs — the button won't reappear until
               // the server reports a terminal status.
+              // `running` distinguishes "a job is executing for this Thread" from
+              // "accepted, waiting its turn on the repo queue". Both keep the
+              // button hidden (the click IS registered either way), but saying
+              // "Re-checking & pushing…" while the job sits behind an hour of other
+              // work on the same repo reads as a hang. Name the wait instead.
               <Space>
                 <Spin size="small" />
                 <Text type="secondary">
-                  {detail.proposal.kind === "code" ? "Re-checking & pushing…" : "Applying…"}
+                  {detail.running
+                    ? detail.proposal.kind === "code"
+                      ? "Re-checking & pushing…"
+                      : "Applying…"
+                    : "Queued — waiting for other work on this repo"}
                 </Text>
               </Space>
             ) : (

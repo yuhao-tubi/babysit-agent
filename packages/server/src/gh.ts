@@ -1,6 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { BranchCommit, FeedbackItem, Pr } from "./types.js";
+import type {
+  BranchCommit,
+  ChecksSummary,
+  FeedbackItem,
+  Pr,
+  ReviewDecision,
+} from "./types.js";
 import {
   ACTIONABLE_CONCLUSIONS,
   ciFeedbackId,
@@ -83,6 +89,113 @@ export async function getPrHead(
     "headRefName,headRefOid",
   ]);
   return { headRefName: r.headRefName, headSha: r.headRefOid };
+}
+
+/**
+ * Everything one `gh pr view` can tell us about a PR's current state, fetched
+ * once per PR per poll. `getPrHead` is the lean version used by the pipeline
+ * (which only ever needs the branch + sha); this one adds the fields the
+ * dashboard renders — the base branch (for Stack detection) and GitHub's review
+ * and check state — at NO extra API cost, since it is the same single call.
+ */
+export interface PrSnapshot {
+  headRefName: string;
+  headSha: string;
+  /** Base branch: `B.base == A.head` is what makes B sit on top of A in a Stack. */
+  baseRefName: string;
+  /** GitHub's overall review decision; null when the repo requires no review. */
+  reviewDecision: ReviewDecision | null;
+  /** How many distinct people have their LATEST review as an approval. */
+  approvalCount: number;
+  checks: ChecksSummary;
+}
+
+/** Check conclusions GitHub paints as a red X on the PR (display only). */
+const FAILED_CONCLUSIONS = new Set([
+  "FAILURE",
+  "TIMED_OUT",
+  "STARTUP_FAILURE",
+  "ACTION_REQUIRED",
+]);
+
+/**
+ * Reduce a `statusCheckRollup` to the counts the PR row renders. Handles both
+ * rollup shapes: GitHub Actions checks (`CheckRun`, with status+conclusion) and
+ * legacy commit statuses (`StatusContext`, with a single state).
+ */
+function summarizeChecks(
+  rollup: {
+    __typename?: string;
+    name?: string;
+    context?: string;
+    status?: string;
+    conclusion?: string;
+    state?: string;
+  }[]
+): ChecksSummary {
+  const failing: string[] = [];
+  let pending = 0;
+  for (const c of rollup) {
+    const name = c.name ?? c.context ?? "check";
+    if (c.__typename === "StatusContext" || (c.state && !c.status)) {
+      if (c.state === "FAILURE" || c.state === "ERROR") failing.push(name);
+      else if (c.state === "PENDING" || c.state === "EXPECTED") pending++;
+      continue;
+    }
+    if (c.status !== "COMPLETED") {
+      pending++;
+      continue;
+    }
+    if (c.conclusion && FAILED_CONCLUSIONS.has(c.conclusion)) failing.push(name);
+  }
+  return { failing, pending, total: rollup.length };
+}
+
+/**
+ * One-call snapshot of a PR's head, base and GitHub review/check state. Used by
+ * the poller; the extra fields are display-only (see CONTEXT.md) and never feed
+ * the verdict/gate/push path.
+ *
+ * `latestReviews` is one entry per reviewer (their most recent review), so
+ * counting `APPROVED` entries is a count of PEOPLE, not of review events. Team
+ * review REQUESTS are deliberately not fetched — that field needs the `read:org`
+ * scope the user's `gh` token lacks and would fail the whole query.
+ */
+export async function getPrSnapshot(
+  owner: string,
+  repo: string,
+  number: number
+): Promise<PrSnapshot> {
+  const r = await ghJson<{
+    headRefName: string;
+    headRefOid: string;
+    baseRefName: string;
+    reviewDecision: string | null;
+    latestReviews: { state?: string }[] | null;
+    statusCheckRollup: Parameters<typeof summarizeChecks>[0] | null;
+  }>([
+    "pr",
+    "view",
+    String(number),
+    "--repo",
+    `${owner}/${repo}`,
+    "--json",
+    "headRefName,headRefOid,baseRefName,reviewDecision,latestReviews,statusCheckRollup",
+  ]);
+  return {
+    headRefName: r.headRefName,
+    headSha: r.headRefOid,
+    baseRefName: r.baseRefName,
+    // Anything unexpected reads as "no decision" rather than a wrong badge.
+    reviewDecision:
+      r.reviewDecision === "APPROVED" ||
+      r.reviewDecision === "CHANGES_REQUESTED" ||
+      r.reviewDecision === "REVIEW_REQUIRED"
+        ? r.reviewDecision
+        : null,
+    approvalCount: (r.latestReviews ?? []).filter((v) => v.state === "APPROVED").length,
+    checks: summarizeChecks(r.statusCheckRollup ?? []),
+  };
 }
 
 /**

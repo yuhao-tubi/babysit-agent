@@ -180,6 +180,29 @@ export interface Pr {
   headSha?: string;
 }
 
+/**
+ * GitHub's own review decision for a PR. `null` when the repo requires no review.
+ * This is the ONLY approval truth we can state: the number of approvals a PR
+ * still NEEDS comes from branch protection, which the `gh` token cannot read
+ * (both the protection and rules endpoints 404), so we never claim "1 of 2".
+ */
+export type ReviewDecision = "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED";
+
+/**
+ * Failing/pending check counts for a PR head — a DISPLAY summary only, as of the
+ * last poll. Deliberately separate from the CI-Thread path (`ci.ts`/`getChecks`),
+ * which stays on its own REST read: this counts EVERY check (the question is "is
+ * my PR red"), whereas a CI Thread is only created for allowlisted checks.
+ */
+export interface ChecksSummary {
+  /** Names of checks that completed in an actionable failure. */
+  failing: string[];
+  /** Checks still queued or running. */
+  pending: number;
+  /** Total checks reported for the head. */
+  total: number;
+}
+
 /** The agent's structured verdict for a Thread. */
 export interface Verdict {
   action: VerdictAction;
