@@ -45,6 +45,7 @@ import {
 } from "./api";
 import { StatusTag } from "./status";
 import { Markdown } from "./Markdown";
+import { cleanBotBody, isBotAuthor } from "./botBody";
 import { RelativeTime } from "./RelativeTime";
 import { DiffView } from "./DiffView";
 import { prUrl, VscodeLink } from "./prLinks";
@@ -717,7 +718,11 @@ export function ThreadDetailView({
                 )}
                 <RelativeTime at={it.createdAt} />
               </Space>
-              <Markdown>{it.body}</Markdown>
+              <Markdown>
+                {isBotAuthor(it.author, it.authorType)
+                  ? cleanBotBody(it.body)
+                  : it.body}
+              </Markdown>
             </div>
           ))}
         </Space>
