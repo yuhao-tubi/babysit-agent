@@ -234,6 +234,12 @@ export interface ThreadDetail {
    * this is what any "working on it" indicator must key off.
    */
   running: boolean;
+  /**
+   * A text Revision (reply draft / PR description) is running. Separate from
+   * `running`: it holds no run claim and leaves the Thread's status alone, so the
+   * frozen Proposal stays approvable while it works.
+   */
+  revising: boolean;
   authorClass: "bot" | "human" | "ci";
   reviewId: number | null;
   threadKey: string;

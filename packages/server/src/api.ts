@@ -21,6 +21,7 @@ import { requestOverview, requestQuestion } from "./overview.js";
 import { requestQuiz } from "./quiz.js";
 import { requestBlindSpots, blindSpotsStale } from "./risks.js";
 import { requestExplanation } from "./explain.js";
+import { isRevising, requestRevision, type ProposalPart } from "./revise.js";
 import { takeoverForThread } from "./takeover.js";
 import { isIgnoredRepo } from "./classify.js";
 import {
@@ -85,6 +86,11 @@ function threadView(id: number) {
     // that "in flight" tells the owner their click is being worked on when it is
     // merely accepted.
     running: isRunning(id),
+    // A Revision (agent re-run on a Proposal part the owner is looking at) is in
+    // flight. Deliberately NOT folded into `running`: the text route holds no run
+    // claim at all, and for the code route this is what tells the card to caption
+    // `in_progress` as "Revising…" instead of the Approve path's "…pushing".
+    revising: isRevising(id),
     items: getThreadItems(id),
     events: getEvents(id),
   };
@@ -420,6 +426,24 @@ export async function startServer(port: number): Promise<void> {
       return reply.code(409).send({ error: "no proposal to approve" });
     }
     void approveReply(Number(req.params.id));
+    return { ok: true };
+  });
+
+  // Revise a parked Proposal PART with the agent: it is shown its own current
+  // output plus the owner's note, and produces a better version of that same part.
+  // Fire-and-forget; the result lands on the frozen Proposal and arrives via SSE.
+  // Never a write path — a revised change re-parks for Approve, a revised reply
+  // still waits for Post (see revise.ts).
+  app.post<{
+    Params: { id: string };
+    Body: { part?: ProposalPart; note?: string };
+  }>("/api/threads/:id/revise", async (req, reply) => {
+    const id = Number(req.params.id);
+    const part: ProposalPart = req.body?.part === "reply" ? "reply" : "change";
+    const note = req.body?.note ?? "";
+    if (!note.trim()) return reply.code(400).send({ error: "note required" });
+    const r = requestRevision(id, part, note);
+    if (!r.ok) return reply.code(409).send({ error: r.reason });
     return { ok: true };
   });
 

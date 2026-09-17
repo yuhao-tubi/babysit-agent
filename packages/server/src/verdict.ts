@@ -365,8 +365,12 @@ export function parseVerdict(text: string, isCi = false): Verdict {
   return v;
 }
 
-/** Build a readable old→new diff of the PR body for the dashboard. */
-function bodyDiff(oldBody: string, newBody: string): string {
+/**
+ * Build a readable old→new diff of the PR body for the dashboard. Exported for
+ * `revise.ts`, which re-diffs the description after revising it so the card keeps
+ * showing what Approve will actually do.
+ */
+export function bodyDiff(oldBody: string, newBody: string): string {
   const out: string[] = ["--- current PR description", "+++ proposed PR description"];
   for (const l of oldBody.split("\n")) out.push(`- ${l}`);
   out.push("~~~");

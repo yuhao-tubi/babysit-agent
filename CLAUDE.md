@@ -41,6 +41,7 @@ packages/server/src
   verdict.ts    Agent SDK call: read-only checkout → structured Verdict
   gate.ts       pre-push gate: build/test or repo-type validator
   executor.ts   acts on a Verdict (fix+push / reply / amend / escalate)
+  revise.ts     Revise button: re-run the agent on one Proposal part + your note
   processor.ts  pipeline orchestration: resolution recheck → verdict → loop-guard → execute
   worktrees.ts  git worktree lifecycle for isolated checkouts/fixes
   db.ts         SQLite schema, migrations, Thread/event queries
@@ -85,6 +86,14 @@ documented keys.
     verbatim post is the **Reply on GitHub** button only. The instruction box's
     **AI refine** helper is a one-shot direct Claude rewrite (`refine.ts`, Bedrock
     `InvokeModel`) — not an agent run, touches nothing, just returns text.
+  - **A Revision improves the Proposal you just read; it never posts or pushes.**
+    Each card's **Revise** button (`revise.ts`) re-runs the agent on ONE part with
+    that part's current output quoted into the prompt plus your note. A code change
+    goes through `applyInstruction` (so the fix→gate loop and the re-park for
+    Approve are inherited); a reply draft / `pr_body` description is revised by a
+    read-only agent that patches only that field of the frozen Proposal — re-read
+    from the db after the run, since `overviewQueue` is concurrent with the
+    pipeline. Settled parts (pushed / posted / dismissed) are never revisable.
   - **A stale Proposal is rebuilt, not dead-ended.** Approve's apply-check
     re-seats the frozen diff with a 3-way merge on mere context drift; on a
     same-line conflict with upstream it **auto-re-proposes** (fix agent re-run on

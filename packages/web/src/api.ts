@@ -86,6 +86,27 @@ export async function refineInstruction(
 }
 
 /**
+ * Ask the agent to revise a parked Proposal part — it is shown its own current
+ * output plus `note` and produces a better version of that same part. Never a
+ * write path: a revised change re-parks for Approve, a revised reply waits for
+ * Post. Fire-and-forget; the result arrives over SSE.
+ */
+export async function reviseProposal(
+  id: number,
+  part: "change" | "reply",
+  note: string
+): Promise<void> {
+  const r = await fetch(`/api/threads/${id}/revise`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ part, note }),
+  });
+  if (!r.ok) {
+    throw new Error((await r.json().catch(() => ({})))?.error ?? "revise failed");
+  }
+}
+
+/**
  * Ask the agent to explain this Thread's question. Optional `question` re-asks
  * ("explain X instead") and replaces the previous answer. Fire-and-forget — the
  * doc arrives over the SSE `thread_updated` stream.

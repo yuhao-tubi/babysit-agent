@@ -40,6 +40,7 @@ import {
   replyToThread,
   resolveThread,
   refineInstruction,
+  reviseProposal,
   explainThread,
   fetchTakeover,
 } from "./api";
@@ -103,6 +104,10 @@ export function ThreadDetailView({
   const [refineNote, setRefineNote] = useState("");
   const [refinePreview, setRefinePreview] = useState("");
   const [refining, setRefining] = useState(false);
+  // Which Proposal part the "Revise with agent" modal is open for (null = closed).
+  const [revisePart, setRevisePart] = useState<"change" | "reply" | null>(null);
+  const [reviseNote, setReviseNote] = useState("");
+  const [reviseSending, setReviseSending] = useState(false);
   const [explainQuestion, setExplainQuestion] = useState("");
   const [explaining, setExplaining] = useState(false);
   const [copyingTakeover, setCopyingTakeover] = useState(false);
@@ -264,6 +269,49 @@ export function ThreadDetailView({
     setInstruction(refinePreview);
     setRefineOpen(false);
   };
+
+  /**
+   * Send the note off to revise one part of the parked proposal. The agent is
+   * shown its own current output plus the note, so this improves what's on screen
+   * instead of re-deciding from the feedback (which is what the instruction box
+   * does). Nothing is written to GitHub: a revised change re-parks for Approve, a
+   * revised reply still waits for Post.
+   */
+  const runRevise = async () => {
+    if (!revisePart || !reviseNote.trim()) return;
+    setReviseSending(true);
+    try {
+      await reviseProposal(id, revisePart, reviseNote);
+      setRevisePart(null);
+      setReviseNote("");
+      message.info(
+        revisePart === "reply"
+          ? "Revising the reply… the new draft will appear here."
+          : "Revising the change… the new proposal will be parked here for approval."
+      );
+      onChanged();
+      load();
+    } catch (e: any) {
+      message.error(e?.message ?? "Couldn't start the revision");
+    } finally {
+      setReviseSending(false);
+    }
+  };
+
+  /** "Revise with agent" trigger for one part of the proposal. */
+  const reviseButton = (part: "change" | "reply") => (
+    <Button
+      icon={<SparkIcon style={{ color: "#722ed1" }} />}
+      loading={detail.revising}
+      onClick={() => {
+        setReviseNote("");
+        setRevisePart(part);
+      }}
+      title="Revise with agent — the agent sees this draft plus your note and produces a better version. Nothing is pushed or posted."
+    >
+      Revise
+    </Button>
+  );
 
   return (
     <Space direction="vertical" size={16} style={{ maxWidth: 900, width: "100%" }}>
@@ -468,7 +516,15 @@ export function ThreadDetailView({
             </Space>
           }
           extra={
-            detail.proposal.kind === "manual_plan" ? (
+            <Space>
+              {/* Revise the change with the agent — offered alongside Approve for
+                  every unsettled change part. Hidden once applied (the bytes are on
+                  GitHub) and while a job runs (the server refuses a concurrent
+                  revision anyway). */}
+              {!detail.proposal.changeApplied &&
+                detail.status !== "in_progress" &&
+                reviseButton("change")}
+              {detail.proposal.kind === "manual_plan" ? (
               <Button
                 type="primary"
                 icon={<CopyOutlined />}
@@ -489,11 +545,17 @@ export function ThreadDetailView({
               <Space>
                 <Spin size="small" />
                 <Text type="secondary">
-                  {detail.running
-                    ? detail.proposal.kind === "code"
-                      ? "Re-checking & pushing…"
-                      : "Applying…"
-                    : "Queued — waiting for other work on this repo"}
+                  {/* A Revision runs the fix agent + gate and re-parks — it does
+                      NOT push, so it must not be captioned as one. */}
+                  {detail.revising
+                    ? detail.running
+                      ? "Revising with the agent…"
+                      : "Revision queued — waiting for other work on this repo"
+                    : detail.running
+                      ? detail.proposal.kind === "code"
+                        ? "Re-checking & pushing…"
+                        : "Applying…"
+                      : "Queued — waiting for other work on this repo"}
                 </Text>
               </Space>
             ) : (
@@ -510,15 +572,16 @@ export function ThreadDetailView({
                   {detail.proposal.kind === "code" ? "Approve & push code" : "Approve & update description"}
                 </Button>
               )
-            )
+              )}
+            </Space>
           }
         >
           <Paragraph type="secondary" style={{ fontSize: 12 }}>
             {detail.proposal.kind === "code"
-              ? "Not pushed yet. Review the diff, then “Approve & push code” re-checks it against the latest branch HEAD, re-runs the gate, and pushes these exact changes. If upstream has since edited the same lines, nothing is pushed — the fix is rebuilt on the new code and parked here for a second approval. The reply below is approved separately. Or send a freeform instruction to revise the proposal — it will re-propose for you to review again."
+              ? "Not pushed yet. Review the diff, then “Approve & push code” re-checks it against the latest branch HEAD, re-runs the gate, and pushes these exact changes. If upstream has since edited the same lines, nothing is pushed — the fix is rebuilt on the new code and parked here for a second approval. The reply below is approved separately. Or click “Revise” to hand this diff plus a note back to the agent — it re-runs the gate and parks a new proposal here, and never pushes."
               : detail.proposal.kind === "manual_plan"
-                ? "This change was too large to apply automatically (the fix agent ran out of turns). Copy the brief below, open this PR's branch in Claude Code, and paste it to finish the change by hand. The daemon will not push this."
-                : "Not applied yet. Review the change, then “Approve & update description” updates the PR description. The reply below is approved separately. Or send a freeform instruction to revise it."}
+                ? "This change was too large to apply automatically (the fix agent ran out of turns). Copy the brief below, open this PR's branch in Claude Code, and paste it to finish the change by hand. The daemon will not push this. “Revise” asks the agent to have another go with a note from you."
+                : "Not applied yet. Review the change, then “Approve & update description” updates the PR description. The reply below is approved separately. Or click “Revise” to hand this draft plus a note back to the agent."}
           </Paragraph>
           {detail.proposal.gateInconclusive && (
             <Paragraph type="warning" style={{ fontSize: 12 }}>
@@ -581,6 +644,7 @@ export function ThreadDetailView({
               // approved first. The card itself is only rendered while the reply is
               // neither posted nor dismissed (see condition above).
               <Space>
+                {reviseButton("reply")}
                 <Button
                   icon={<CopyOutlined />}
                   onClick={() => copyPlan(detail.proposal!.replyDraft!)}
@@ -609,8 +673,10 @@ export function ThreadDetailView({
             <Paragraph type="secondary" style={{ fontSize: 12 }}>
               Not posted yet. “Post reply” posts this to the GitHub thread. It is
               independent of the change above — push the code without it, or post
-              it without the code. “Copy” drops the text into the instruction box
-              to refine; a freeform instruction re-drafts it.
+              it without the code. “Revise” hands this draft and your note to the
+              agent, which checks the code and rewrites it in place (still not
+              posted). “Copy” drops the text into the instruction box to edit by
+              hand.
             </Paragraph>
             <Markdown>{detail.proposal.replyDraft}</Markdown>
           </Card>
@@ -847,6 +913,42 @@ export function ThreadDetailView({
           </Button>
         </Space>
       </Card>
+
+      {/* Revise with agent — the note is the ONLY input; the current draft is
+          already on the card above and is sent to the agent server-side, so there
+          is nothing to preview here (unlike AI refine, which edits text in place). */}
+      <Modal
+        title={revisePart === "reply" ? "Revise the reply with agent" : "Revise the change with agent"}
+        open={revisePart !== null}
+        // Antd anchors a modal 100px from the top by default, which parks this one
+        // over the page header instead of over the card it belongs to.
+        centered
+        onCancel={() => setRevisePart(null)}
+        okText="Revise"
+        okButtonProps={{ disabled: !reviseNote.trim(), icon: <SparkIcon /> }}
+        confirmLoading={reviseSending}
+        onOk={runRevise}
+        width={620}
+      >
+        <Paragraph type="secondary" style={{ fontSize: 12 }}>
+          {revisePart === "reply"
+            ? "The agent gets the draft above plus your note, checks the code, and rewrites the draft in place. It is not posted — you still click “Post reply”."
+            : detail.proposal?.kind === "pr_body"
+              ? "The agent gets the proposed description above plus your note and rewrites it. Nothing is applied — you still click Approve."
+              : "The agent gets the diff above plus your note, re-makes the change on the current branch head, and re-runs the gate. Nothing is pushed — the revised proposal is parked here for a fresh Approve."}
+        </Paragraph>
+        <Input.TextArea
+          value={reviseNote}
+          onChange={(e) => setReviseNote(e.target.value)}
+          autoSize={{ minRows: 3, maxRows: 10 }}
+          autoFocus
+          placeholder={
+            revisePart === "reply"
+              ? "e.g. also mention we already handle the empty case, and drop the last paragraph"
+              : "e.g. do the same for the other two call sites, and keep the early return"
+          }
+        />
+      </Modal>
 
       <Modal
         title="AI refine"
