@@ -119,7 +119,10 @@ documented keys.
   introduce an Octokit/token path.
 - **Verdicts must be grounded.** The agent investigates the real checkout before
   deciding; bot false-positives require cited file/line proof. When unsure,
-  escalate.
+  escalate. For a PR that is one layer of a **Stack**, the whole chain is context:
+  the prompt names every layer (below/above/aside), the other layers' branches are
+  fetched so the agent can diff them, and a change that belongs to a different
+  layer escalates instead of being proposed here (pushes stay single-branch).
 
 ## Conventions
 

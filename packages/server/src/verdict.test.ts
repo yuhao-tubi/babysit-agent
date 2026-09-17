@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractVerdictObject, parseVerdict } from "./verdict.js";
+import { extractVerdictObject, parseVerdict, stackBriefing } from "./verdict.js";
 
 test("parses a plain trailing json verdict block", () => {
   const text = [
@@ -97,4 +97,26 @@ test("a dismiss verdict parses for a review thread", () => {
 test("a dismiss verdict is coerced to escalate for CI", () => {
   const text = '{ "action": "dismiss", "summary": "s", "reply_draft": "", "risk": "low" }';
   assert.equal(parseVerdict(text, true).action, "escalate");
+});
+
+// ---- stack briefing ----
+// A layer of a PR Stack is a slice of a bigger change, so the verdict prompt must
+// name the whole chain, the diff commands that scope it, and the push limit.
+
+test("the stack briefing names the chain, both diffs, and the push limit", () => {
+  const layers = [
+    { prKey: "o/r#1", owner: "o", repo: "r", number: 1, headRef: "a", baseRef: "master", title: "Base", rootKey: "o/r#1", rootBaseRef: "master", depth: 1, order: 0, parentPrKey: null, position: "below" as const },
+    { prKey: "o/r#2", owner: "o", repo: "r", number: 2, headRef: "b", baseRef: "a", title: "Mine", rootKey: "o/r#1", rootBaseRef: "master", depth: 2, order: 1, parentPrKey: "o/r#1", position: "self" as const },
+    { prKey: "o/r#3", owner: "o", repo: "r", number: 3, headRef: "c", baseRef: "b", title: "Next", rootKey: "o/r#1", rootBaseRef: "master", depth: 3, order: 2, parentPrKey: "o/r#2", position: "above" as const },
+  ];
+  const text = stackBriefing({ self: layers[1], layers, parentRef: "a", rootBaseRef: "master" });
+  assert.match(text, /layer L2 of a 3-PR chain/);
+  // This PR's own change vs the whole stack's.
+  assert.match(text, /git diff origin\/a\.\.\.HEAD/);
+  assert.match(text, /git diff origin\/master\.\.\.HEAD/);
+  // The layer above is fetched but not checked out.
+  assert.match(text, /origin\/c/);
+  assert.match(text, /NOT in this checkout/);
+  // A fix can only land on this PR's branch.
+  assert.match(text, /only be pushed to THIS PR's branch \(b\)/);
 });

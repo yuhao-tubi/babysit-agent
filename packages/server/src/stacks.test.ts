@@ -1,12 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { buildStacks } = await import("./stacks.js");
+const { buildStacks, stackContextFor } = await import("./stacks.js");
 type Input = Parameters<typeof buildStacks>[0][number];
 
 /** A PR in `adRise/www` with the given number, head and base. */
 function pr(number: number, headRef: string, baseRef: string | null): Input {
   return { prKey: `adRise/www#${number}`, owner: "adRise", repo: "www", number, headRef, baseRef };
+}
+
+/** The same, with the title `stackContextFor` also needs. */
+function layer(number: number, headRef: string, baseRef: string | null) {
+  return { ...pr(number, headRef, baseRef), title: `PR ${number}` };
 }
 
 test("a plain 3-chain is one stack, labelled bottom-up", () => {
@@ -95,4 +100,66 @@ test("a PR based on its own head is treated as a root", () => {
 test("a null baseRef (row polled before base_ref existed) is a root, never a link", () => {
   const s = buildStacks([pr(1, "a", null), pr(2, "b", null)]);
   assert.equal(s.size, 0);
+});
+
+// ---- stackContextFor (the Verdict's view) ----
+
+test("the middle layer sees the one below it and the one above it", () => {
+  const prs = [layer(1, "a", "master"), layer(2, "b", "a"), layer(3, "c", "b")];
+  const ctx = stackContextFor("adRise/www#2", prs)!;
+  assert.equal(ctx.layers.length, 3);
+  assert.deepEqual(
+    ctx.layers.map((l) => [l.number, l.position]),
+    [[1, "below"], [2, "self"], [3, "above"]]
+  );
+  // Its own diff is measured against the layer below; the stack's against the trunk.
+  assert.equal(ctx.parentRef, "a");
+  assert.equal(ctx.rootBaseRef, "master");
+});
+
+test("the bottom layer measures its own diff against the trunk", () => {
+  const ctx = stackContextFor("adRise/www#1", [layer(1, "a", "master"), layer(2, "b", "a")])!;
+  assert.equal(ctx.parentRef, "master");
+  assert.deepEqual(
+    ctx.layers.map((l) => l.position),
+    ["self", "above"]
+  );
+});
+
+test("every layer above is 'above', not just the direct child", () => {
+  const prs = [layer(1, "a", "master"), layer(2, "b", "a"), layer(3, "c", "b"), layer(4, "d", "c")];
+  const ctx = stackContextFor("adRise/www#2", prs)!;
+  assert.deepEqual(
+    ctx.layers.map((l) => [l.number, l.position]),
+    [[1, "below"], [2, "self"], [3, "above"], [4, "above"]]
+  );
+});
+
+test("the other arm of a fork is 'aside' — neither in the checkout nor downstream", () => {
+  // #1 -> #2, and #1 -> #3: #3 is a sibling of #2, not above it.
+  const prs = [layer(1, "a", "master"), layer(2, "b", "a"), layer(3, "c", "a")];
+  const ctx = stackContextFor("adRise/www#2", prs)!;
+  assert.deepEqual(
+    ctx.layers.map((l) => [l.number, l.position]),
+    [[1, "below"], [2, "self"], [3, "aside"]]
+  );
+});
+
+test("a standalone PR has no stack context at all", () => {
+  const prs = [layer(1, "a", "master"), layer(9, "z", "master")];
+  assert.equal(stackContextFor("adRise/www#9", prs), null);
+});
+
+test("a stack in another repo is never mixed in", () => {
+  const other = {
+    prKey: "adRise/api#7",
+    owner: "adRise",
+    repo: "api",
+    number: 7,
+    headRef: "b",
+    baseRef: "a",
+    title: "API PR",
+  };
+  const ctx = stackContextFor("adRise/www#2", [layer(1, "a", "master"), layer(2, "b", "a"), other])!;
+  assert.deepEqual(ctx.layers.map((l) => l.prKey), ["adRise/www#1", "adRise/www#2"]);
 });

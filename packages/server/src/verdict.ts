@@ -5,10 +5,11 @@ import { isMaxTurnsError, RunTrace } from "./sdk.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
 import { materializeCiLog } from "./ci.js";
 import { preTriage } from "./triage.js";
-import { logEvent } from "./db.js";
+import { logEvent, listLivePrs } from "./db.js";
 import { emit } from "./events.js";
 import type { FeedbackItem, ThreadRow, Verdict } from "./types.js";
 import { getPrHead, getPrBody } from "./gh.js";
+import { stackContextFor, type StackContext } from "./stacks.js";
 
 const CI_VERDICT_SYSTEM = `You triage a FAILING CI CHECK on a pull request. You work in a read-only checkout of the PR branch. The failing check's full log has been written to a file on disk. Never guess.
 
@@ -78,13 +79,79 @@ Set risk:"high" for anything touching security or correctness — a high-risk ch
 
 Citing code: whenever you reference a specific file/line to explain or justify something (in summary or reply_draft), embed it as a GitHub permalink instead of a bare path:line. The prompt gives you a repo blob base URL pinned to the PR head commit; build links as \`<base>/<path>#L<line>\` (or \`#L<start>-L<end>\` for a range), and render them as markdown, e.g. \`[\`html5.ts:2726\`](<base>/packages/player/src/adapters/html5.ts#L2726)\`. Keep the visible text as the human-readable \`file:line\` so it stays readable, but make it a clickable link.`;
 
+/**
+ * The whole-Stack briefing, told to the agent when this PR is one layer of a
+ * chain. Feedback on a layer is feedback on a slice of a larger change, and a
+ * layer-blind verdict gets it wrong in both directions: the reviewer's line may
+ * have been introduced by a layer BELOW (already in this checkout, so it looks
+ * like ours), and a "this is unused / has no caller / has no test" claim is often
+ * answered by a layer ABOVE (not in this checkout at all, so it looks true).
+ *
+ * The other layers' branches are fetched into the base clone by `addWorktree`
+ * (`extraRefs`), so every `git` command named here resolves without network work
+ * the agent has to think about.
+ */
+export function stackBriefing(ctx: StackContext, opts: { isCi?: boolean } = {}): string {
+  const self = ctx.layers.find((l) => l.position === "self")!;
+  const lines: string[] = [];
+  lines.push(
+    `PR STACK: this PR is layer L${self.depth} of a ${ctx.layers.length}-PR chain in this repo ` +
+      `(a PR sits on top of another when its base branch is that PR's head branch).`
+  );
+  for (const l of ctx.layers) {
+    const where =
+      l.position === "self"
+        ? "THIS PR"
+        : l.position === "below"
+          ? "below — its code is already in this checkout"
+          : l.position === "above"
+            ? `above — builds on this PR, NOT in this checkout (fetched as origin/${l.headRef})`
+            : `other arm of a fork — not in this checkout (fetched as origin/${l.headRef})`;
+    lines.push(
+      `  ${l.position === "self" ? ">" : " "} L${l.depth} #${l.number} ${l.headRef} — ${l.title}  [${where}]`
+    );
+  }
+  lines.push("");
+  lines.push("Judge the feedback against the WHOLE stack, not just this PR's own diff:");
+  lines.push(
+    `- This checkout is this PR's head, so it CONTAINS every layer below it. This PR's own change is ` +
+      `\`git diff origin/${ctx.parentRef}...HEAD\`; the whole stack so far is ` +
+      `\`git diff origin/${ctx.rootBaseRef || "master"}...HEAD\`. Check which layer a line came from ` +
+      `(\`git log -1 <path>\`, \`git blame\`) before treating it as this PR's.`
+  );
+  lines.push(
+    `- Layers above are NOT checked out but their branches ARE fetched. Before concluding something is ` +
+      `unused, uncalled, untested or unfinished, look at them: \`git diff HEAD...origin/<ref>\`, ` +
+      `\`git log origin/<ref>\`. A gap this stack closes one layer up is not a defect.`
+  );
+  lines.push(
+    `- A fix can only be pushed to THIS PR's branch (${self.headRef}). If the right change belongs to a ` +
+      `different layer, do NOT propose it here — escalate, say which PR owns it, and ` +
+      (opts.isCi
+        ? `let the owner decide where it lands.`
+        : `offer the choice in options (e.g. "fix it on top in this PR" vs "fix it in #N").`)
+  );
+  if (opts.isCi) {
+    lines.push(
+      `- A check can fail on this layer because of a lower layer's commit. Localize the failure to a ` +
+        `layer before proposing: only propose when the fix is in this PR's own diff.`
+    );
+  } else {
+    lines.push(
+      `- Say which layer you mean in summary/reply_draft when it matters (e.g. "that line comes from #N").`
+    );
+  }
+  return lines.join("\n");
+}
+
 function buildPrompt(
   s: ThreadRow,
   items: FeedbackItem[],
   blobBase: string,
   prBody: string,
   dir: string,
-  maxTurns: number
+  maxTurns: number,
+  stack: StackContext | null
 ): string {
   const lines: string[] = [];
   // Where you are, first line — see worktreeBriefing.
@@ -98,6 +165,10 @@ function buildPrompt(
   lines.push(`Repo blob base URL (pinned to PR head): ${blobBase}`);
   lines.push(`  Build code links as <base>/<path>#L<line>, e.g. ${blobBase}/packages/player/src/adapters/html5.ts#L2726`);
   lines.push("");
+  if (stack) {
+    lines.push(stackBriefing(stack));
+    lines.push("");
+  }
   lines.push("Current PR description (for the amend_pr_body policy — this is the text the description-feedback refers to):");
   lines.push("<<<PR_DESCRIPTION");
   lines.push(prBody || "(empty)");
@@ -141,7 +212,8 @@ function buildCiPrompt(
   blobBase: string,
   logPath: string,
   dir: string,
-  maxTurns: number
+  maxTurns: number,
+  stack: StackContext | null
 ): string {
   const it = items[0];
   const lines: string[] = [];
@@ -156,6 +228,10 @@ function buildCiPrompt(
   lines.push(`Failing check log (read/grep this file for the error): ${logPath}`);
   if (it?.htmlUrl) lines.push(`Run URL: ${it.htmlUrl}`);
   lines.push("");
+  if (stack) {
+    lines.push(stackBriefing(stack, { isCi: true }));
+    lines.push("");
+  }
   lines.push(
     "Read the log file, find the failure, investigate the referenced source files in this checkout, then return your verdict as the trailing JSON block."
   );
@@ -354,8 +430,17 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
   // multi-GB CoW copy + top-up install) is pure waste that would hold the serial
   // repo queue for minutes and stall every owner action on the repo. Matches the
   // other read-only consumers (overview/risks/quiz).
+  // Where this PR sits in its Stack (null when standalone), derived from the live
+  // PR rows exactly like the dashboard's. A layer of a stack is a slice of a bigger
+  // change, so the agent is shown the whole chain — and the other layers' branches
+  // are fetched into the clone so it can actually diff them. See `stackBriefing`.
+  const stack = stackContextFor(s.prKey, listLivePrs());
+  const stackRefs = (stack?.layers ?? [])
+    .filter((l) => l.position !== "self")
+    .map((l) => l.headRef);
   const { dir } = await addWorktree(s.owner, s.repo, head.headRefName, s.id, {
     skipDeps: true,
+    extraRefs: stackRefs,
   });
   const blobBase = `https://github.com/${s.owner}/${s.repo}/blob/${head.headSha}`;
   try {
@@ -372,11 +457,19 @@ export async function runVerdict(s: ThreadRow, items: FeedbackItem[]): Promise<V
     // audit trail per run — without it a max-turns failure leaves no trace of
     // what the agent actually spent its budget on. See RunTrace.
     const trace = new RunTrace(dir);
+    if (stack) {
+      const self = stack.layers.find((l) => l.position === "self")!;
+      logEvent(
+        s.id,
+        "verdict_stack",
+        `L${self.depth} of ${stack.layers.length}; own diff vs origin/${stack.parentRef}`
+      );
+    }
     try {
       for await (const msg of query({
         prompt: isCi
-          ? buildCiPrompt(s, items, blobBase, ciLogPath as string, dir, maxTurns)
-          : buildPrompt(s, items, blobBase, prBody, dir, maxTurns),
+          ? buildCiPrompt(s, items, blobBase, ciLogPath as string, dir, maxTurns, stack)
+          : buildPrompt(s, items, blobBase, prBody, dir, maxTurns, stack),
         options: {
           cwd: dir,
           model: modelArn,

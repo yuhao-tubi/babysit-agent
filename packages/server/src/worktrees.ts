@@ -256,7 +256,7 @@ export async function addWorktree(
   repo: string,
   headRef: string,
   threadId: number,
-  opts: { skipDeps?: boolean; lightDeps?: boolean } = {}
+  opts: { skipDeps?: boolean; lightDeps?: boolean; extraRefs?: string[] } = {}
 ): Promise<Worktree> {
   const wt = worktreePath(owner, repo, threadId);
 
@@ -276,6 +276,18 @@ export async function addWorktree(
     mkdirSync(worktreesDir(owner, repo), { recursive: true });
 
     await git(base, ["fetch", "origin", headRef, "--prune"]);
+    // Extra branches the agent must be able to name but not check out — the other
+    // layers of a PR Stack, so `git diff origin/<layer>` works (see verdict.ts).
+    // Best-effort: a branch that was renamed or deleted since the last poll must
+    // never fail the worktree, so a combined fetch falls back to per-ref tries and
+    // any ref that still won't fetch is simply absent (the agent's diff on it
+    // errors, which is a missing input, not a broken run).
+    const extra = [...new Set(opts.extraRefs ?? [])].filter((r) => r && r !== headRef);
+    if (extra.length) {
+      await git(base, ["fetch", "origin", ...extra]).catch(async () => {
+        for (const ref of extra) await git(base, ["fetch", "origin", ref]).catch(() => {});
+      });
+    }
     // Detached at the PR head sha: avoids the one-branch-per-worktree restriction
     // entirely, and we push by explicit refspec (HEAD:headRef) anyway.
     await git(base, ["worktree", "add", "--detach", wt, `origin/${headRef}`]);
