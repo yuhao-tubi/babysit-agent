@@ -99,7 +99,7 @@ test("empty candidates merge to an empty array (zero-risk case)", () => {
   assert.deepEqual(mergeRiskVerdicts([], []), []);
 });
 
-test("parseRisksFile parses a valid finder array", () => {
+test("parseRisksFile parses a valid finder array", async () => {
   const raw = JSON.stringify([
     {
       id: "risk-1",
@@ -110,13 +110,13 @@ test("parseRisksFile parses a valid finder array", () => {
       codeSnippet: "c",
     },
   ]);
-  const risks = parseRisksFile(raw);
+  const risks = await parseRisksFile(raw);
   assert.equal(risks.length, 1);
   assert.equal(risks[0].id, "risk-1");
   assert.equal(risks[0].level, "high");
 });
 
-test("parseRisksFile passes through the author layer tag when present", () => {
+test("parseRisksFile passes through the author layer tag when present", async () => {
   const raw = JSON.stringify([
     {
       id: "risk-1",
@@ -128,43 +128,60 @@ test("parseRisksFile passes through the author layer tag when present", () => {
       codeSnippet: "c",
     },
   ]);
-  const risks = parseRisksFile(raw);
+  const risks = await parseRisksFile(raw);
   assert.equal(risks[0].layer, "analytics");
 });
 
-test("parseRisksFile passes through inDescription as a boolean, ignores non-booleans", () => {
+test("parseRisksFile passes through inDescription as a boolean, ignores non-booleans", async () => {
   const raw = JSON.stringify([
     { id: "a", title: "t", level: "low", inDescription: false, location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
     { id: "b", title: "t", level: "low", inDescription: true, location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
     { id: "c", title: "t", level: "low", inDescription: "yes", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
   ]);
-  const risks = parseRisksFile(raw);
+  const risks = await parseRisksFile(raw);
   assert.equal(risks.find((r) => r.id === "a")!.inDescription, false);
   assert.equal(risks.find((r) => r.id === "b")!.inDescription, true);
   assert.equal(risks.find((r) => r.id === "c")!.inDescription, undefined);
 });
 
-test("parseRisksFile returns [] on malformed or non-array JSON", () => {
-  assert.deepEqual(parseRisksFile("not json"), []);
-  assert.deepEqual(parseRisksFile('{"not":"an array"}'), []);
+test("parseRisksFile returns [] on malformed or non-array JSON", async () => {
+  assert.deepEqual(await parseRisksFile("not json"), []);
+  assert.deepEqual(await parseRisksFile('{"not":"an array"}'), []);
 });
 
-test("parseRisksFile drops entries missing required fields", () => {
+test("parseRisksFile drops entries missing required fields", async () => {
   const raw = JSON.stringify([
     { id: "ok", title: "t", level: "low", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
     { id: "bad-no-location", title: "t", level: "low", explanation: "e", codeSnippet: "c" },
     { title: "bad-no-id", level: "low", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
     { id: "bad-level", title: "t", level: "critical", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
   ]);
-  const risks = parseRisksFile(raw);
+  const risks = await parseRisksFile(raw);
   assert.deepEqual(risks.map((r) => r.id), ["ok"]);
 });
 
-test("parseVerdictsFile returns [] on malformed JSON (confirmer-failure degradation)", () => {
+test("parseRisksFile keeps a syntactically valid mermaid diagram", async () => {
+  const raw = JSON.stringify([
+    { id: "ok", title: "t", level: "low", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c", mermaid: "flowchart TD\n  A --> B" },
+  ]);
+  const risks = await parseRisksFile(raw);
+  assert.equal(risks[0].mermaid, "flowchart TD\n  A --> B");
+});
+
+test("parseRisksFile drops a mermaid diagram that fails to parse, keeps the rest of the risk", async () => {
+  const raw = JSON.stringify([
+    { id: "ok", title: "t", level: "low", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c", mermaid: "flowchart TD\n  A --> [bad" },
+  ]);
+  const risks = await parseRisksFile(raw);
+  assert.equal(risks.length, 1);
+  assert.equal(risks[0].mermaid, undefined);
+});
+
+test("parseVerdictsFile returns [] on malformed JSON (confirmer-failure degradation)", async () => {
   assert.deepEqual(parseVerdictsFile("boom"), []);
   // and merging with [] leaves every finder risk unverified
   const risks = mergeRiskVerdicts(
-    parseRisksFile(
+    await parseRisksFile(
       JSON.stringify([
         { id: "risk-1", title: "t", level: "high", location: { path: "a.ts", startLine: 1, permalink: "p" }, explanation: "e", codeSnippet: "c" },
       ])

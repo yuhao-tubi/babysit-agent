@@ -9,6 +9,7 @@ import { getThread, getThreadItems, isPrExpired, logEvent, updateThread } from "
 import { emit } from "./events.js";
 import { overviewQueue } from "./queue.js";
 import { addWorktree, removeWorktree } from "./worktrees.js";
+import { isValidMermaid } from "./mermaidValidate.js";
 import type { ExplanationStatus, FeedbackItem, ThreadRow } from "./types.js";
 
 /**
@@ -123,6 +124,28 @@ export function buildExplainPrompt(
  * see the code the claim rests on. Requiring the sha-pinned base (not just any
  * GitHub URL) means a citation into some other tree does not count.
  */
+/**
+ * The agent authors mermaid without seeing it rendered (same situation as
+ * risks.ts). Rather than let a broken chart reach the dashboard, parse-check
+ * every fenced ```mermaid block and demote a failing one to a plain fence — the
+ * source stays visible as text, but nothing tries (and fails) to render it.
+ */
+export async function demoteBrokenMermaid(md: string): Promise<string> {
+  const re = /```mermaid\n([\s\S]*?)\n```/g;
+  const matches = [...md.matchAll(re)];
+  if (matches.length === 0) return md;
+  const valid = await Promise.all(matches.map((m) => isValidMermaid(m[1])));
+  let out = "";
+  let cursor = 0;
+  matches.forEach((m, i) => {
+    out += md.slice(cursor, m.index);
+    out += valid[i] ? m[0] : "```\n" + m[1] + "\n```";
+    cursor = m.index! + m[0].length;
+  });
+  out += md.slice(cursor);
+  return out;
+}
+
 export function isGrounded(md: string, blobBase: string): boolean {
   if (!md.trim()) return false;
   // `#L<n>` is the load-bearing part: a bare blob link doesn't say WHICH code
@@ -250,7 +273,8 @@ export async function generateExplanation(
     }
 
     const path = join(dir, EXPLANATION_FILE);
-    const md = existsSync(path) ? readFileSync(path, "utf8") : "";
+    const rawMd = existsSync(path) ? readFileSync(path, "utf8") : "";
+    const md = rawMd ? await demoteBrokenMermaid(rawMd) : rawMd;
     // No file, empty file, or no citation → `failed`. Storing an ungrounded
     // explanation is worse than storing none: it reads as authoritative.
     const status: ExplanationStatus = isGrounded(md, blobBase) ? "ready" : "failed";

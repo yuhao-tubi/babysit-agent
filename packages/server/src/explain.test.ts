@@ -6,9 +6,22 @@ import { join } from "node:path";
 
 process.env.BABYSIT_DATA_DIR = mkdtempSync(join(tmpdir(), "babysit-explain-test-"));
 
-const { isGrounded, buildExplainPrompt, explainWorktreeKey } = await import("./explain.js");
+const { isGrounded, buildExplainPrompt, explainWorktreeKey, demoteBrokenMermaid } = await import(
+  "./explain.js"
+);
 
 const BLOB = "https://github.com/owner/repo/blob/abc123";
+
+test("demoteBrokenMermaid leaves a valid diagram alone", async () => {
+  const md = "before\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\nafter";
+  assert.equal(await demoteBrokenMermaid(md), md);
+});
+
+test("demoteBrokenMermaid strips the mermaid tag off a chart that fails to parse, keeps the source", async () => {
+  const md = "before\n\n```mermaid\nflowchart TD\n  A --> [bad\n```\n\nafter";
+  const out = await demoteBrokenMermaid(md);
+  assert.equal(out, "before\n\n```\nflowchart TD\n  A --> [bad\n```\n\nafter");
+});
 
 test("isGrounded accepts a doc citing at least one permalink", () => {
   const md = `The flush is safe because the socket is drained first —

@@ -11,6 +11,7 @@ import { isIgnoredRepo } from "./classify.js";
 import { overviewQueue } from "./queue.js";
 import { emit } from "./events.js";
 import type { RiskCandidate, RiskItem, RiskLevel, RiskVerdictRecord } from "./types.js";
+import { isValidMermaid } from "./mermaidValidate.js";
 
 const LEVELS: RiskLevel[] = ["low", "medium", "high"];
 const isLevel = (v: unknown): v is RiskLevel => LEVELS.includes(v as RiskLevel);
@@ -20,9 +21,12 @@ const isLevel = (v: unknown): v is RiskLevel => LEVELS.includes(v as RiskLevel);
  * `[]` on malformed / non-array JSON (which drives a `failed` status upstream)
  * and drops any entry missing the required grounded fields (id / title / level /
  * location{path,startLine,permalink} / explanation / codeSnippet). Optional
- * `category`, `endLine`, and `mermaid` are passed through when present.
+ * `category`, `endLine`, and `mermaid` are passed through when present. `mermaid`
+ * is additionally parse-checked — the finder never sees it rendered (see
+ * mermaidValidate.ts), so a diagram that fails to parse is dropped here rather
+ * than reaching the dashboard as a broken chart.
  */
-export function parseRisksFile(raw: string): RiskCandidate[] {
+export async function parseRisksFile(raw: string): Promise<RiskCandidate[]> {
   let arr: unknown;
   try {
     arr = JSON.parse(raw);
@@ -64,7 +68,9 @@ export function parseRisksFile(raw: string): RiskCandidate[] {
     if (typeof o.category === "string" && o.category.trim()) c.category = o.category;
     if (typeof o.layer === "string" && o.layer.trim()) c.layer = o.layer;
     if (typeof o.inDescription === "boolean") c.inDescription = o.inDescription;
-    if (typeof o.mermaid === "string" && o.mermaid.trim()) c.mermaid = o.mermaid;
+    if (typeof o.mermaid === "string" && o.mermaid.trim() && (await isValidMermaid(o.mermaid))) {
+      c.mermaid = o.mermaid;
+    }
     out.push(c);
   }
   return out;
@@ -378,7 +384,7 @@ export async function analyzeRisks(opts: {
   if (!existsSync(risksPath)) return { risks: [], status: "failed" };
   let candidates: RiskCandidate[];
   try {
-    candidates = parseRisksFile(readFileSync(risksPath, "utf8"));
+    candidates = await parseRisksFile(readFileSync(risksPath, "utf8"));
   } catch {
     return { risks: [], status: "failed" };
   }

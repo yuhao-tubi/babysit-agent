@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import mermaid from "mermaid";
 
-mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "strict" });
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "neutral",
+  securityLevel: "strict",
+  // Otherwise mermaid draws its own "bomb" error SVG straight into the page on a
+  // parse failure, bypassing the fallback below entirely.
+  suppressErrorRendering: true,
+});
 
 let idSeq = 0;
 
