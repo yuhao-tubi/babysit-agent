@@ -72,6 +72,9 @@ export interface PrGroup {
   expiredAt: string | null;
   /** Base branch of the PR (null on rows polled before it was recorded). */
   baseRef: string | null;
+  /** Login that opened the PR — rendered on reviewer rows ("whose PR is this").
+   *  Null on rows last polled before it was recorded. */
+  author: string | null;
   reviewDecision: ReviewDecision | null;
   /** People whose latest review is an approval. */
   approvalCount: number;

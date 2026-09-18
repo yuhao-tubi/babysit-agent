@@ -103,6 +103,8 @@ export interface PrSnapshot {
   headSha: string;
   /** Base branch: `B.base == A.head` is what makes B sit on top of A in a Stack. */
   baseRefName: string;
+  /** GitHub login of whoever opened the PR; null when GitHub reports no user. */
+  author: string | null;
   /** GitHub's overall review decision; null when the repo requires no review. */
   reviewDecision: ReviewDecision | null;
   /** How many distinct people have their LATEST review as an approval. */
@@ -171,6 +173,7 @@ export async function getPrSnapshot(
     headRefOid: string;
     baseRefName: string;
     reviewDecision: string | null;
+    author: { login?: string } | null;
     latestReviews: { state?: string }[] | null;
     statusCheckRollup: Parameters<typeof summarizeChecks>[0] | null;
   }>([
@@ -180,12 +183,13 @@ export async function getPrSnapshot(
     "--repo",
     `${owner}/${repo}`,
     "--json",
-    "headRefName,headRefOid,baseRefName,reviewDecision,latestReviews,statusCheckRollup",
+    "headRefName,headRefOid,baseRefName,reviewDecision,author,latestReviews,statusCheckRollup",
   ]);
   return {
     headRefName: r.headRefName,
     headSha: r.headRefOid,
     baseRefName: r.baseRefName,
+    author: r.author?.login ?? null,
     // Anything unexpected reads as "no decision" rather than a wrong badge.
     reviewDecision:
       r.reviewDecision === "APPROVED" ||

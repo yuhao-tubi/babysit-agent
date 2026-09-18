@@ -208,6 +208,10 @@ function migrate(d: Database.Database): void {
   // `checks_json` is the ChecksSummary (failing check NAMES + pending/total): the
   // names are what make the badge tooltip useful ("flaky e2e" vs "typecheck").
   addPrCol("base_ref", "TEXT");
+  // GitHub login of whoever OPENED the PR. Only interesting for role="reviewer"
+  // rows (an authored PR is yours by definition), where the sidebar shows whose
+  // PR is waiting on your review. NULL on rows last polled before this existed.
+  addPrCol("pr_author", "TEXT");
   addPrCol("review_decision", "TEXT");
   addPrCol("approval_count", "INTEGER");
   addPrCol("checks_json", "TEXT");
@@ -266,6 +270,8 @@ export function upsertPr(p: {
   role?: PrRole;
   /** Base branch — the link Stack detection follows. */
   baseRef?: string | null;
+  /** GitHub login that opened the PR (display only; see the column comment). */
+  author?: string | null;
   reviewDecision?: ReviewDecision | null;
   approvalCount?: number | null;
   checks?: ChecksSummary | null;
@@ -273,12 +279,13 @@ export function upsertPr(p: {
   getDb()
     .prepare(
       `INSERT INTO prs (pr_key, owner, repo, number, title, url, head_ref, head_sha, role,
-                        base_ref, review_decision, approval_count, checks_json, last_polled, expired_at)
+                        base_ref, pr_author, review_decision, approval_count, checks_json, last_polled, expired_at)
        VALUES (@prKey,@owner,@repo,@number,@title,@url,@headRef,@headSha,@role,
-               @baseRef,@reviewDecision,@approvalCount,@checksJson,@lastPolled,NULL)
+               @baseRef,@author,@reviewDecision,@approvalCount,@checksJson,@lastPolled,NULL)
        ON CONFLICT(pr_key) DO UPDATE SET
          title=@title, url=@url, head_ref=@headRef, head_sha=@headSha, role=@role,
-         base_ref=@baseRef, review_decision=@reviewDecision, approval_count=@approvalCount,
+         base_ref=@baseRef, pr_author=@author, review_decision=@reviewDecision,
+         approval_count=@approvalCount,
          checks_json=@checksJson, last_polled=@lastPolled, expired_at=NULL`
     )
     // Bound explicitly rather than by spreading `p`: `checks` is an object, and
@@ -294,6 +301,7 @@ export function upsertPr(p: {
       headSha: p.headSha ?? null,
       role: p.role ?? "author",
       baseRef: p.baseRef ?? null,
+      author: p.author ?? null,
       reviewDecision: p.reviewDecision ?? null,
       approvalCount: p.approvalCount ?? null,
       checksJson: p.checks ? JSON.stringify(p.checks) : null,
@@ -584,6 +592,8 @@ export interface PrRow {
   headRef: string;
   /** Branch the PR targets; null on rows last polled before this existed. */
   baseRef: string | null;
+  /** Login that opened the PR — the reviewer-row "whose PR is this". */
+  author: string | null;
   /** GitHub's review decision as of the last poll (null = none required/unknown). */
   reviewDecision: ReviewDecision | null;
   /** People whose latest review is an approval, as of the last poll. */
@@ -595,7 +605,7 @@ export interface PrRow {
 /** The `prs` columns every PR-list query selects. */
 const PR_ROW_COLS =
   "pr_key, owner, repo, number, title, url, role, last_polled, expired_at, " +
-  "head_ref, base_ref, review_decision, approval_count, checks_json";
+  "head_ref, base_ref, pr_author, review_decision, approval_count, checks_json";
 
 function parseChecks(json: string | null): ChecksSummary | null {
   if (!json) return null;
@@ -621,6 +631,7 @@ function rowToPrRow(r: any): PrRow {
     expiredAt: r.expired_at ?? null,
     headRef: r.head_ref,
     baseRef: r.base_ref ?? null,
+    author: r.pr_author ?? null,
     reviewDecision: (r.review_decision as ReviewDecision) ?? null,
     approvalCount: r.approval_count ?? 0,
     checks: parseChecks(r.checks_json ?? null),

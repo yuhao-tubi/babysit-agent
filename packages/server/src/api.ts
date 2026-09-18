@@ -168,6 +168,7 @@ export async function startServer(port: number): Promise<void> {
       // required-approval count lives in branch protection, which our token
       // cannot read, so the row states what GitHub told us and nothing more.
       baseRef: p.baseRef,
+      author: p.author,
       reviewDecision: p.reviewDecision,
       approvalCount: p.approvalCount,
       checks: p.checks,

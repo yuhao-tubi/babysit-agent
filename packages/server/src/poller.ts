@@ -90,6 +90,8 @@ export async function pollOnce(): Promise<PollResult> {
         headSha: head.headSha,
         role: "reviewer",
         baseRef: head.baseRefName,
+        // Whose PR you're being asked to review — shown on the sidebar row.
+        author: head.author,
         reviewDecision: head.reviewDecision,
         approvalCount: head.approvalCount,
         checks: head.checks,
@@ -115,6 +117,7 @@ export async function pollOnce(): Promise<PollResult> {
         headRef: head.headRefName,
         headSha: head.headSha,
         baseRef: head.baseRefName,
+        author: head.author,
         reviewDecision: head.reviewDecision,
         approvalCount: head.approvalCount,
         checks: head.checks,

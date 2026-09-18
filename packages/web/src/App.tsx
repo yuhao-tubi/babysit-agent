@@ -13,7 +13,12 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { ReloadOutlined, GithubOutlined, FileTextOutlined } from "@ant-design/icons";
+import {
+  ReloadOutlined,
+  GithubOutlined,
+  FileTextOutlined,
+  UserOutlined,
+} from "@ant-design/icons";
 import type { PrGroup, ThreadStatus, ThreadSummary } from "./types";
 import { fetchConfig, fetchExpiredPrs, fetchPrs, triggerPoll } from "./api";
 import { useEventStream } from "./useEventStream";
@@ -585,11 +590,26 @@ function PrNode({
   onSelectPr: (prKey: string) => void;
   defaultOpen: boolean;
 }) {
+  // On a reviewer row the left slot has no thread counts to show (the PR never
+  // enters the pipeline), so it names the PR's OWNER instead — on a review queue
+  // "whose PR is this" is the thing you triage by. The purple REVIEW tag already
+  // says overview-only; the tooltip repeats it for the row that has no counts.
   const counts =
     pr.role === "reviewer" ? (
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        Overview only
-      </Text>
+      <Tooltip
+        title={
+          pr.author
+            ? `Opened by @${pr.author} — overview only, never auto-fixed`
+            : "Overview only — never auto-fixed"
+        }
+      >
+        <Space size={4} style={{ minWidth: 0 }}>
+          <UserOutlined style={{ fontSize: 12, color: "rgba(0,0,0,0.45)" }} />
+          <Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+            {pr.author ?? "Overview only"}
+          </Text>
+        </Space>
+      </Tooltip>
     ) : (
       <Space size={4}>
         {pr.counts.blocked > 0 && <Badge color="#ff4d4f" count={pr.counts.blocked} />}
