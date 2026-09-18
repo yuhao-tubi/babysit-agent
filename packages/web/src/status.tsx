@@ -11,7 +11,8 @@ const STATUS_PRESET: Record<ThreadStatus, string> = {
   resolved: "success",
 };
 
-const STATUS_LABEL: Record<ThreadStatus, string> = {
+/** Human label per thread status — shared with the sidebar's Status filter. */
+export const STATUS_LABEL: Record<ThreadStatus, string> = {
   blocked: "Blocked",
   error: "Error",
   awaiting_approval: "Awaiting approval",

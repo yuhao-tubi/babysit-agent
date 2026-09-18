@@ -14,11 +14,17 @@ import {
   Typography,
 } from "antd";
 import { ReloadOutlined, GithubOutlined, FileTextOutlined } from "@ant-design/icons";
-import type { PrGroup, ThreadSummary } from "./types";
+import type { PrGroup, ThreadStatus, ThreadSummary } from "./types";
 import { fetchConfig, fetchExpiredPrs, fetchPrs, triggerPoll } from "./api";
 import { useEventStream } from "./useEventStream";
 import { ThreadDetailView } from "./ThreadDetail";
 import { StatusTag } from "./status";
+import {
+  applyStatusFilter,
+  statusCounts,
+  statusFilterKey,
+  ThreadStatusFilter,
+} from "./statusFilter";
 import { RelativeTime } from "./RelativeTime";
 import { TaskQueue } from "./TaskQueue";
 import { OverviewPanel } from "./OverviewPanel";
@@ -54,6 +60,9 @@ export function App() {
   // Sidebar view toggle: the live tree ("current") or the paginated, lazily
   // loaded read-only history of merged/closed PRs ("expired").
   const [view, setView] = useState<"current" | "expired">("current");
+  // Thread statuses the sidebar is narrowed to; empty = no filter. Client-side
+  // and per-session (see statusFilter.tsx), shared by both sidebar views.
+  const [statusFilter, setStatusFilter] = useState<ThreadStatus[]>([]);
   // Per-PR counter bumped on each `pr_overview_updated` SSE event; passed to the
   // OverviewPanel so it re-fetches live during generation.
   const [overviewTicks, setOverviewTicks] = useState<Record<string, number>>({});
@@ -141,6 +150,11 @@ export function App() {
   // via `selectedPr` (set from the hash); no thread auto-select needed.
   const linkedPr = selectedPr;
 
+  // The sidebar tree, narrowed to the selected thread statuses. Only the tree is
+  // filtered: the header's TaskQueue is a global view of what the daemon is doing
+  // and must not shrink because you narrowed what you're looking at.
+  const visiblePrs = applyStatusFilter(prs, statusFilter);
+
   return (
     <Layout style={{ height: "100vh" }}>
       <Sider
@@ -211,6 +225,15 @@ export function App() {
               { label: "Expired", value: "expired" },
             ]}
           />
+          <div style={{ marginTop: 8 }}>
+            <ThreadStatusFilter
+              value={statusFilter}
+              onChange={setStatusFilter}
+              // Only the Current view can count honestly: Expired pages in lazily,
+              // so its totals would only ever describe what happens to be loaded.
+              counts={view === "current" ? statusCounts(prs) : undefined}
+            />
+          </div>
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", padding: 12 }}>
@@ -220,6 +243,7 @@ export function App() {
               selectedPr={selectedPr}
               onSelect={select}
               onSelectPr={selectPr}
+              statusFilter={statusFilter}
             />
           ) : prs.length === 0 ? (
             <Empty
@@ -227,6 +251,16 @@ export function App() {
               description="No PRs with feedback yet."
               style={{ marginTop: 48 }}
             />
+          ) : visiblePrs.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="No threads in the selected statuses."
+              style={{ marginTop: 48 }}
+            >
+              <Button size="small" onClick={() => setStatusFilter([])}>
+                Clear filter
+              </Button>
+            </Empty>
           ) : (
             <Space direction="vertical" size={16} style={{ width: "100%" }}>
               {(
@@ -237,7 +271,7 @@ export function App() {
               ).map(({ role, label }) => {
                 // /api/prs returns live PRs only (expired live in their own view),
                 // so no expiry filtering is needed here.
-                const group = prs.filter((p) => p.role === role);
+                const group = visiblePrs.filter((p) => p.role === role);
                 if (!group.length) return null;
                 return (
                   <div key={label}>
@@ -254,6 +288,10 @@ export function App() {
                       }}
                     >
                       {label} ({group.length})
+                      {/* Say it rather than leave it puzzling: a review-only PR
+                          has no Threads, so a Thread-status filter can't apply
+                          to this section and its count doesn't move. */}
+                      {statusFilter.length > 0 && role === "reviewer" && " · not filtered"}
                     </Text>
                     <PrList
                       prs={group}
@@ -262,6 +300,7 @@ export function App() {
                       onSelect={select}
                       onSelectPr={selectPr}
                       linkedPr={linkedPr}
+                      statusFilter={statusFilter}
                     />
                   </div>
                 );
@@ -335,11 +374,13 @@ function ExpiredList({
   selectedPr,
   onSelect,
   onSelectPr,
+  statusFilter,
 }: {
   selected: number | null;
   selectedPr: string | null;
   onSelect: (id: number) => void;
   onSelectPr: (prKey: string) => void;
+  statusFilter: ThreadStatus[];
 }) {
   const PAGE_SIZE = 20;
   const [items, setItems] = useState<PrGroup[]>([]);
@@ -383,17 +424,30 @@ function ExpiredList({
     );
   }
 
+  // Filtering here rather than in the fetch keeps the pages honest: a page can
+  // filter down to nothing while more pages remain, so "Load more" stays.
+  const visible = applyStatusFilter(items, statusFilter);
+  const filterKey = statusFilterKey(statusFilter);
+  const filtered = statusFilter.length > 0;
+
   return (
     <Space direction="vertical" size={10} style={{ width: "100%" }}>
-      {items.map((pr) => (
+      {filtered && visible.length === 0 && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          No threads in the selected statuses on the {items.length} PRs loaded so far.
+        </Text>
+      )}
+      {visible.map((pr) => (
         <PrNode
-          key={pr.prKey}
+          key={`${pr.prKey}:${filterKey}`}
           pr={pr}
           selected={selected}
           selectedPr={selectedPr}
           onSelect={onSelect}
           onSelectPr={onSelectPr}
-          defaultOpen={false}
+          // A filter is a search: open what matched instead of making the owner
+          // click through every card to find it.
+          defaultOpen={filtered}
         />
       ))}
       {hasMore && (
@@ -421,6 +475,7 @@ function PrList({
   onSelect,
   onSelectPr,
   linkedPr,
+  statusFilter,
 }: {
   prs: PrGroup[];
   selected: number | null;
@@ -428,6 +483,7 @@ function PrList({
   onSelect: (id: number) => void;
   onSelectPr: (prKey: string) => void;
   linkedPr: string | null;
+  statusFilter: ThreadStatus[];
 }) {
   const members = new Map<string, PrGroup[]>();
   for (const pr of prs) {
@@ -440,16 +496,25 @@ function PrList({
     list.sort((a, b) => a.stack!.order - b.stack!.order);
   }
 
+  // Part of every card's key, so changing the filter remounts them — antd reads
+  // `defaultActiveKey` on mount only, and a filter must be able to re-open a card.
+  const filterKey = statusFilterKey(statusFilter);
+  const filtered = statusFilter.length > 0;
+
   const node = (pr: PrGroup) => (
     <PrNode
-      key={pr.prKey}
+      key={`${pr.prKey}:${filterKey}`}
       pr={pr}
       selected={selected}
       selectedPr={selectedPr}
       onSelect={onSelect}
       onSelectPr={onSelectPr}
+      // A filter is a search: open what matched, even a resolved PR, which is
+      // exactly what you asked to see when you filtered by Resolved.
       defaultOpen={
-        (pr.role === "author" && pr.status !== "resolved") || pr.prKey === linkedPr
+        (filtered && pr.role === "author") ||
+        (pr.role === "author" && pr.status !== "resolved") ||
+        pr.prKey === linkedPr
       }
     />
   );
