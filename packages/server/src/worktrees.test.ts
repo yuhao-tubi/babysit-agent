@@ -91,6 +91,85 @@ test("no package.json in worktree → can't prove safe, returns false", () => {
   assert.equal(allDepsPresentInBase(base, wt), false);
 });
 
+// ---- lightDepsPlan: a renamed workspace package must not force a copy ----
+
+const { lightDepsPlan } = await import("./worktrees.js");
+
+/** Write a workspace member at `<wt>/<rel>` declaring itself as `name`. */
+function writeWorkspacePkg(wt: string, rel: string, name: string): void {
+  mkdirSync(join(wt, rel), { recursive: true });
+  writeFileSync(join(wt, rel, "package.json"), JSON.stringify({ name }));
+}
+
+function writeRootPkg(
+  dir: string,
+  deps: Record<string, string>,
+  workspaces?: string[]
+): void {
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: deps, workspaces }));
+}
+
+test("everything present in base → plan is a single base symlink", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  writeRootPkg(wt, { react: "^18.0.0" });
+  assert.equal(lightDepsPlan(base, wt).kind, "base");
+});
+
+test("a RENAMED local workspace package resolves via override, not a copy", () => {
+  const base = scratch();
+  const wt = scratch();
+  // Base master installed the package under its old name only.
+  installInBase(base, ["@myorg/hls.js"]);
+  // The PR renamed the workspace package: same directory, new package name.
+  writeRootPkg(wt, { "@myorg/hls": "*" }, ["packages/*"]);
+  writeWorkspacePkg(wt, "packages/hls.js", "@myorg/hls");
+
+  const plan = lightDepsPlan(base, wt);
+  assert.equal(plan.kind, "base+workspace");
+  if (plan.kind !== "base+workspace") return;
+  assert.deepEqual([...plan.overrides.keys()], ["@myorg/hls"]);
+  // The override must point at the directory already in the worktree.
+  assert.equal(plan.overrides.get("@myorg/hls"), join(wt, "packages/hls.js"));
+});
+
+test("a genuinely NEW external dep still forces the copy+install path", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  writeRootPkg(wt, { react: "^18.0.0", "brand-new-lib": "^1.0.0" }, ["packages/*"]);
+  writeWorkspacePkg(wt, "packages/local", "@myorg/local");
+  // `brand-new-lib` is not a workspace member, so it has to be fetched.
+  assert.equal(lightDepsPlan(base, wt).kind, "copy");
+});
+
+test("one workspace override plus one external addition → copy (no half measures)", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  writeRootPkg(wt, { react: "^18", "@myorg/hls": "*", "needs-download": "^1" }, ["packages/*"]);
+  writeWorkspacePkg(wt, "packages/hls.js", "@myorg/hls");
+  assert.equal(lightDepsPlan(base, wt).kind, "copy");
+});
+
+test("no package.json → copy, never a guess", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  assert.equal(lightDepsPlan(base, wt).kind, "copy");
+});
+
+test("a missing dep that is NOT a workspace member → copy even with workspaces declared", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, []);
+  writeRootPkg(wt, { "some-lib": "^1.0.0" }, ["packages/*"]);
+  // packages/ exists but holds an unrelated member.
+  writeWorkspacePkg(wt, "packages/other", "@myorg/other");
+  assert.equal(lightDepsPlan(base, wt).kind, "copy");
+});
+
 // ---- applyPatchRebasing: landing a frozen proposal on a moved tree ----
 
 const { applyPatchRebasing } = await import("./worktrees.js");

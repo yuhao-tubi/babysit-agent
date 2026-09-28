@@ -39,6 +39,7 @@ import { refineText } from "./refine.js";
 import { onEvent, emit } from "./events.js";
 import { loadConfig } from "./config.js";
 import { isRunning } from "./running.js";
+import { worktreePath } from "./worktrees.js";
 import { buildStacks, type StackInfo } from "./stacks.js";
 import type { ThreadStatus } from "./types.js";
 
@@ -93,6 +94,12 @@ function threadView(id: number) {
     revising: isRevising(id),
     items: getThreadItems(id),
     events: getEvents(id),
+    // Only surfaced when the worktree actually exists on disk (fixes create one
+    // lazily; a Thread that never auto-fixed has nothing to point at) — so the
+    // dashboard can offer a "copy path" affordance for opening it in Zed/terminal.
+    worktreePath: existsSync(worktreePath(s.owner, s.repo, id))
+      ? worktreePath(s.owner, s.repo, id)
+      : null,
   };
 }
 

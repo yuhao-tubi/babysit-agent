@@ -230,6 +230,8 @@ export interface ThreadDetail {
   prTitle: string | null;
   /** Where this PR sits in its Stack; null when standalone. */
   stack: StackInfo | null;
+  /** Local checkout for this Thread's fix, if one has been created; null otherwise. */
+  worktreePath: string | null;
   status: ThreadStatus;
   /**
    * A job is EXECUTING for this Thread right now. `status === "in_progress"` also

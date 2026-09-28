@@ -187,3 +187,24 @@ const gateLocks = new SerialQueue(1);
 export function withGateLock<T>(key: string, gate: () => Promise<T>): Promise<T> {
   return gateLocks.run(key, gate);
 }
+
+/**
+ * Per-repo mutex around the CoW copy + top-up install branch of `shareDeps` —
+ * at most one such clone+install per repo, whatever `REPO_CONCURRENCY` is.
+ *
+ * The symlink fast path is cheap and stays outside this lock (still up to
+ * `REPO_CONCURRENCY` at once). But when the lockfile has diverged, `shareDeps`
+ * clones the base `node_modules` (hundreds of thousands of inodes on
+ * `adRise/www` — minutes just for the clonefile step, observed directly, not
+ * "near-instant" as the small-repo case assumes) and then runs a full `yarn
+ * install`. Several of those at once on the SAME source tree don't parallelize
+ * — they thrash each other on disk I/O and each one slows down, so three
+ * concurrent Threads needing this path can all still be running 40+ minutes
+ * later with nothing finished. Same shape as `withGateLock`: the expensive
+ * step files through one at a time; investigation/agent work stays wide.
+ */
+const depsLocks = new SerialQueue(1);
+
+export function withDepsLock<T>(key: string, copy: () => Promise<T>): Promise<T> {
+  return depsLocks.run(key, copy);
+}

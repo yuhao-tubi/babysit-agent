@@ -3,6 +3,7 @@ import notifier from "node-notifier";
 import { loadConfig } from "./config.js";
 import { emit } from "./events.js";
 import { logEvent, listThreads } from "./db.js";
+import { requestExplanation } from "./explain.js";
 
 // De-dupe banners per PR: one PR may escalate several threads in a cycle.
 const notifiedPrs = new Set<string>();
@@ -22,6 +23,10 @@ const bannersSupported =
 export function notifyEscalation(threadId: number, prKey: string, message: string): void {
   emit({ type: "notification", prKey, threadId, message });
   logEvent(threadId, "notification", message);
+  // Every escalation needs your judgment, so have the Explanation ready before
+  // you even open the Thread. Best-effort: requestExplanation no-ops quietly
+  // if it's disabled, out of scope, or already running.
+  requestExplanation(threadId);
   if (notifiedPrs.has(prKey)) return;
   notifiedPrs.add(prKey);
 

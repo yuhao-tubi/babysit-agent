@@ -342,6 +342,16 @@ export function ThreadDetailView({
             <Text type="secondary" style={{ fontSize: 13 }}>
               {detail.prKey}
             </Text>
+            {/* Where the fix's checkout lives on disk — for opening in Zed/terminal. */}
+            {detail.worktreePath && (
+              <Text
+                type="secondary"
+                style={{ fontSize: 13, fontFamily: "monospace" }}
+                copyable={{ text: detail.worktreePath }}
+              >
+                {detail.worktreePath}
+              </Text>
+            )}
             {/* Why this diff may be sitting on unmerged code. */}
             {detail.stack && (
               <Text type="secondary" style={{ fontSize: 13 }}>

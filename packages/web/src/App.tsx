@@ -110,9 +110,13 @@ export function App() {
       // deep-links to the thread — previously these were silently dropped, so a
       // failed push looked like nothing happened.
       if (ev?.type === "notification") {
+        const description =
+          ev.message.length > 200
+            ? `${ev.message.slice(0, 200)}… (click for details)`
+            : ev.message;
         notification.warning({
           message: ev.prKey,
-          description: ev.message,
+          description,
           duration: 0, // stay until dismissed — it's an action item
           onClick: () => {
             location.hash = `#/thread/${ev.threadId}`;
@@ -757,6 +761,10 @@ function PrNode({
   );
 }
 
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 function ThreadRow({
   t,
   active,
@@ -810,7 +818,7 @@ function ThreadRow({
         <Paragraph
           type="secondary"
           style={{ fontSize: 12, margin: "4px 0 0" }}
-          ellipsis={{ rows: 2, tooltip: t.summary }}
+          ellipsis={{ rows: 2, tooltip: truncate(t.summary, 300) }}
         >
           {t.summary}
         </Paragraph>

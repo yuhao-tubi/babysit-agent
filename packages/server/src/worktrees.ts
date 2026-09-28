@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { runRepoSetup } from "./repo-setup.js";
-import { withBaseLock } from "./queue.js";
+import { withBaseLock, withDepsLock } from "./queue.js";
 
 const exec = promisify(execFile);
 
@@ -47,7 +47,7 @@ function worktreesDir(owner: string, repo: string): string {
   return join(loadConfig().worktreesRoot, `${owner}__${repo}`);
 }
 
-function worktreePath(owner: string, repo: string, threadId: number): string {
+export function worktreePath(owner: string, repo: string, threadId: number): string {
   return join(worktreesDir(owner, repo), String(threadId));
 }
 
@@ -301,7 +301,7 @@ export async function addWorktree(
   // per-id worktree dir only (base node_modules is read as a symlink/CoW source),
   // so it is safe outside the base lock.
   if (!opts.skipDeps) {
-    await shareDeps(base, wt, { light: opts.lightDeps });
+    await shareDeps(base, wt, { light: opts.lightDeps, repoKey: `${owner}/${repo}` });
     await seedBuildArtifacts(base, wt);
   }
   return { dir: wt, remoteSha };
@@ -392,6 +392,133 @@ export function allDepsPresentInBase(base: string, wt: string): boolean {
 }
 
 /**
+ * Package name → absolute directory for each of the worktree's own workspace
+ * packages (yarn `workspaces` globs, e.g. `packages/*`). A workspace package is
+ * a directory that is ALREADY IN THE WORKTREE, so making it resolvable costs one
+ * symlink and never a download — which is why it must not be lumped in with a
+ * genuinely new external dependency (see `lightDepsPlan`).
+ *
+ * Only the literal and trailing-`/*` glob forms are expanded: those are what real
+ * manifests use, and anything fancier returns nothing so the caller falls back to
+ * the safe copy path rather than guessing.
+ */
+function workspacePackageDirs(wt: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const manifest = join(wt, "package.json");
+  if (!existsSync(manifest)) return out;
+  let globs: string[];
+  try {
+    const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+    const ws = pkg.workspaces;
+    globs = Array.isArray(ws) ? ws : Array.isArray(ws?.packages) ? ws.packages : [];
+  } catch {
+    return out;
+  }
+  for (const glob of globs) {
+    if (typeof glob !== "string") continue;
+    const dirs = glob.endsWith("/*")
+      ? (() => {
+          const parent = join(wt, glob.slice(0, -2));
+          if (!existsSync(parent)) return [];
+          return readdirSync(parent, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => join(parent, e.name));
+        })()
+      : [join(wt, glob)];
+    for (const dir of dirs) {
+      try {
+        const name = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))?.name;
+        if (typeof name === "string" && name) out.set(name, dir);
+      } catch {
+        // Not a package (or unreadable) — simply not a workspace member.
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * How the light gate can get a resolvable `node_modules` without a copy+install.
+ *
+ * `base` — every declared dep is already installed in base, so the whole tree can
+ * be one symlink (cheapest, and the long-standing behaviour).
+ *
+ * `base+workspace` — the only deps base lacks are the worktree's OWN workspace
+ * packages. That happens whenever a PR renames a local package: `adRise/www`
+ * renamed `packages/hls.js` from `@adrise/hls.js` to `@adrise/hls`, so base
+ * master had no `node_modules/@adrise/hls` and a single missing name sent every
+ * Thread in the stack down the full 234k-file copy + `yarn install` — to
+ * materialize a package that was already sitting in the worktree. `tsconfig`'s
+ * `@adrise/* → packages/*` mapping doesn't rescue it either, since the directory
+ * (`hls.js`) no longer matches the package name (`hls`).
+ *
+ * `copy` — a genuinely new EXTERNAL dep (must be fetched), or anything we can't
+ * prove, so the caller keeps the safe copy+install path.
+ */
+export function lightDepsPlan(
+  base: string,
+  wt: string
+): { kind: "base" } | { kind: "base+workspace"; overrides: Map<string, string> } | { kind: "copy" } {
+  const deps = declaredDeps(wt);
+  if (!deps) return { kind: "copy" }; // can't prove safe
+  const baseNm = join(base, "node_modules");
+  const missing = deps.filter((name) => !existsSync(join(baseNm, name)));
+  if (!missing.length) return { kind: "base" };
+
+  const workspaces = workspacePackageDirs(wt);
+  const overrides = new Map<string, string>();
+  for (const name of missing) {
+    const dir = workspaces.get(name);
+    if (!dir) return { kind: "copy" }; // a real external addition → must install
+    overrides.set(name, dir);
+  }
+  return { kind: "base+workspace", overrides };
+}
+
+/**
+ * Build `dstNm` as a real directory that resolves everything from `baseNm` while
+ * shadowing `overrides` with the worktree's own workspace packages.
+ *
+ * Entries are symlinked per top-level name (one syscall per package rather than
+ * per file), and only a scope that an override lands inside is expanded into a
+ * real directory — so `@adrise/hls` costs a real `@adrise` dir and leaves the
+ * other ~2000 entries as single links.
+ *
+ * ONLY valid on the light path, which runs no installer. Handing this shape to
+ * `yarn install` is what corrupted base once already: a package with a nested
+ * `node_modules` makes the symlink a path INTO base, so the installer's
+ * writes/deletes land in the shared tree and break sibling worktrees with ENOENT.
+ */
+function linkBaseWithWorkspaceOverrides(
+  baseNm: string,
+  dstNm: string,
+  overrides: Map<string, string>
+): void {
+  mkdirSync(dstNm, { recursive: true });
+  const overrideScopes = new Set(
+    [...overrides.keys()].filter((n) => n.startsWith("@")).map((n) => n.split("/")[0])
+  );
+  for (const ent of readdirSync(baseNm, { withFileTypes: true })) {
+    if (overrideScopes.has(ent.name)) {
+      const scopeDir = join(dstNm, ent.name);
+      mkdirSync(scopeDir, { recursive: true });
+      for (const member of readdirSync(join(baseNm, ent.name))) {
+        symlinkSync(join(baseNm, ent.name, member), join(scopeDir, member), "dir");
+      }
+    } else {
+      symlinkSync(join(baseNm, ent.name), join(dstNm, ent.name), "dir");
+    }
+  }
+  for (const [name, dir] of overrides) {
+    const target = join(dstNm, name);
+    mkdirSync(join(target, ".."), { recursive: true });
+    // Unlinks a link we just made for a name base also had; never follows into it.
+    rmSync(target, { recursive: true, force: true });
+    symlinkSync(dir, target, "dir");
+  }
+}
+
+/**
  * Make the base's installed dependencies available in the worktree. Common case
  * (PR doesn't touch deps): symlink the base node_modules. Divergent lockfile:
  * APFS copy-on-write clone + top-up install local to the worktree, so we never
@@ -410,7 +537,7 @@ export function allDepsPresentInBase(base: string, wt: string): boolean {
 async function shareDeps(
   base: string,
   wt: string,
-  opts: { light?: boolean } = {}
+  opts: { light?: boolean; repoKey?: string } = {}
 ): Promise<void> {
   const baseNm = join(base, "node_modules");
   if (!existsSync(baseNm)) return; // nothing provisioned (non-node repo)
@@ -424,33 +551,59 @@ async function shareDeps(
     return;
   }
 
-  // Light gate + only version bumps of already-installed packages → symlink base
-  // deps and skip the copy/install entirely (see doc comment). A newly-ADDED dep
-  // fails the presence check and falls through to the copy path below.
-  if (opts.light && allDepsPresentInBase(base, wt)) {
-    symlinkSync(baseNm, join(wt, "node_modules"), "dir");
-    return;
+  // Light gate → skip the copy/install entirely when base's installed tree can be
+  // made to resolve (see `lightDepsPlan`): directly, or with the worktree's own
+  // workspace packages shadowing base for names base lacks. Only a genuinely new
+  // EXTERNAL dep — one that has to be fetched — falls through to the copy below.
+  if (opts.light) {
+    const plan = lightDepsPlan(base, wt);
+    if (plan.kind === "base") {
+      symlinkSync(baseNm, join(wt, "node_modules"), "dir");
+      return;
+    }
+    if (plan.kind === "base+workspace") {
+      linkBaseWithWorkspaceOverrides(baseNm, join(wt, "node_modules"), plan.overrides);
+      return;
+    }
   }
 
   // Divergent (or unknown) lockfile → private copy so a top-up install stays
-  // local to this worktree. cp -c uses APFS copy-on-write (near-instant).
-  await exec("cp", ["-cR", baseNm, join(wt, "node_modules")], {
-    maxBuffer: 64 * 1024 * 1024,
+  // local to this worktree. cp -c uses APFS copy-on-write, but that is only
+  // "near-instant" on a small tree: it pays a clonefile syscall PER FILE, and
+  // `adRise/www`'s node_modules is ~234k files, so this step alone is minutes.
+  //
+  // Per-package symlinks instead of a file-level clone is NOT a valid
+  // shortcut, even though it is ~1000x faster to set up: a package with a
+  // nested `node_modules` (yarn's answer to a version conflict) makes the
+  // symlink a path INTO the shared base tree, so the top-up install below
+  // writes/deletes real files in base rather than in this worktree — it
+  // corrupted base and broke sibling worktrees with ENOENT on a nested
+  // `@scope/pkg/node_modules`. A faster provisioning path has to keep the
+  // worktree's tree genuinely private below the package boundary.
+  //
+  // Serialized per repo (see withDepsLock): several of these on the same source
+  // tree thrash each other on disk I/O rather than parallelizing, so three
+  // concurrent Threads could all still be running 40+ minutes later with
+  // nothing finished.
+  await withDepsLock(opts.repoKey ?? base, async () => {
+    await exec("cp", ["-cR", baseNm, join(wt, "node_modules")], {
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    const hasYarn = existsSync(join(wt, "yarn.lock"));
+    if (hasYarn) {
+      await exec("yarn", ["install", "--non-interactive"], {
+        cwd: wt,
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 20 * 60 * 1000,
+      });
+    } else if (existsSync(join(wt, "package-lock.json"))) {
+      await exec("npm", ["install"], {
+        cwd: wt,
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 20 * 60 * 1000,
+      });
+    }
   });
-  const hasYarn = existsSync(join(wt, "yarn.lock"));
-  if (hasYarn) {
-    await exec("yarn", ["install", "--non-interactive"], {
-      cwd: wt,
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 20 * 60 * 1000,
-    });
-  } else if (existsSync(join(wt, "package-lock.json"))) {
-    await exec("npm", ["install"], {
-      cwd: wt,
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 20 * 60 * 1000,
-    });
-  }
 }
 
 /**
