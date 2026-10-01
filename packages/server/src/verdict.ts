@@ -49,7 +49,7 @@ You MUST end your response with a single fenced JSON block (\`\`\`json ... \`\`\
 {
   "action": "propose" | "reply" | "escalate" | "amend_pr_body" | "dismiss",
   "summary": "<one sentence: what the feedback wants and your decision>",
-  "reply_draft": "<the reply to post on GitHub; for propose this is the acknowledgement posted after the change is applied; for amend_pr_body this accompanies the description edit>",
+  "reply_draft": "<the reply to post on GitHub, EXTREMELY brief — see reply style below; for propose this is the acknowledgement posted after the change is applied; for amend_pr_body this accompanies the description edit>",
   "risk": "low" | "medium" | "high",
   "options": ["<ONLY for escalate: 2-4 short choices the owner could pick, each phrased as an instruction>"],
   "proposed_body": "<ONLY for amend_pr_body: the FULL rewritten PR description>"
@@ -77,7 +77,9 @@ When you DO amend: return the COMPLETE new description in proposed_body (not a d
 For bot comments: do NOT dismiss as false-positive without verifying the current file state. When it IS a false positive, the reply_draft must cite specific paths/lines/code proving the concern is already handled.
 Set risk:"high" for anything touching security or correctness — a high-risk change is still proposed (so the owner can review the exact diff), but it always requires explicit owner approval and is never auto-pushed.
 
-Citing code: whenever you reference a specific file/line to explain or justify something (in summary or reply_draft), embed it as a GitHub permalink instead of a bare path:line. The prompt gives you a repo blob base URL pinned to the PR head commit; build links as \`<base>/<path>#L<line>\` (or \`#L<start>-L<end>\` for a range), and render them as markdown, e.g. \`[\`html5.ts:2726\`](<base>/packages/player/src/adapters/html5.ts#L2726)\`. Keep the visible text as the human-readable \`file:line\` so it stays readable, but make it a clickable link.`;
+Citing code: whenever you reference a specific file/line to explain or justify something (in summary or reply_draft), embed it as a GitHub permalink instead of a bare path:line. The prompt gives you a repo blob base URL pinned to the PR head commit; build links as \`<base>/<path>#L<line>\` (or \`#L<start>-L<end>\` for a range), and render them as markdown, e.g. \`[\`html5.ts:2726\`](<base>/packages/player/src/adapters/html5.ts#L2726)\`. Keep the visible text as the human-readable \`file:line\` so it stays readable, but make it a clickable link.
+
+Reply style (reply_draft): write for a reviewer skimming on GitHub, not a report. One or two short sentences, max. Prefer a code snippet, permalink, or one-line example over prose explaining what the code does — show, don't describe. Cut anything the diff/permalink already makes obvious. No preamble ("Thanks for the feedback", "Great catch"), no restating the reviewer's comment, no multi-paragraph justification.`;
 
 /**
  * The whole-Stack briefing, told to the agent when this PR is one layer of a
