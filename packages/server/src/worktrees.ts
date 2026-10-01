@@ -444,12 +444,12 @@ function workspacePackageDirs(wt: string): Map<string, string> {
  * be one symlink (cheapest, and the long-standing behaviour).
  *
  * `base+workspace` — the only deps base lacks are the worktree's OWN workspace
- * packages. That happens whenever a PR renames a local package: `adRise/www`
- * renamed `packages/hls.js` from `@adrise/hls.js` to `@adrise/hls`, so base
- * master had no `node_modules/@adrise/hls` and a single missing name sent every
+ * packages. That happens whenever a PR renames a local package: a monorepo
+ * renamed `packages/hls.js` from `@org/hls.js` to `@org/hls`, so base
+ * master had no `node_modules/@org/hls` and a single missing name sent every
  * Thread in the stack down the full 234k-file copy + `yarn install` — to
  * materialize a package that was already sitting in the worktree. `tsconfig`'s
- * `@adrise/* → packages/*` mapping doesn't rescue it either, since the directory
+ * `@org/* → packages/*` mapping doesn't rescue it either, since the directory
  * (`hls.js`) no longer matches the package name (`hls`).
  *
  * `copy` — a genuinely new EXTERNAL dep (must be fetched), or anything we can't
@@ -481,7 +481,7 @@ export function lightDepsPlan(
  *
  * Entries are symlinked per top-level name (one syscall per package rather than
  * per file), and only a scope that an override lands inside is expanded into a
- * real directory — so `@adrise/hls` costs a real `@adrise` dir and leaves the
+ * real directory — so `@org/hls` costs a real `@org` dir and leaves the
  * other ~2000 entries as single links.
  *
  * ONLY valid on the light path, which runs no installer. Handing this shape to
@@ -570,7 +570,7 @@ async function shareDeps(
   // Divergent (or unknown) lockfile → private copy so a top-up install stays
   // local to this worktree. cp -c uses APFS copy-on-write, but that is only
   // "near-instant" on a small tree: it pays a clonefile syscall PER FILE, and
-  // `adRise/www`'s node_modules is ~234k files, so this step alone is minutes.
+  // a large monorepo's node_modules can be ~234k files, so this step alone is minutes.
   //
   // Per-package symlinks instead of a file-level clone is NOT a valid
   // shortcut, even though it is ~1000x faster to set up: a package with a

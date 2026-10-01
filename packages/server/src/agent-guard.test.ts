@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { agentGuardHooks, createRepeatGuard, scanDenialReason, worktreeBriefing } from "./agent-guard.js";
 
-const WT = "/data/cache/worktrees/adRise__www/-35613";
+const WT = "/data/cache/worktrees/org__web/-35613";
 const denied = (cmd: string) => scanDenialReason(cmd, WT) !== null;
 
 test("denies the whole-filesystem scans observed in the wild", () => {
@@ -37,7 +37,7 @@ test("allows every legitimate search scoped to the worktree", () => {
   assert.ok(!denied('grep -rn "gapController" src'));
   assert.ok(!denied("rg -n useAutoplay packages/player/src"));
   assert.ok(!denied("git grep -n gapController"));
-  assert.ok(!denied('find node_modules/@adrise -maxdepth 1 -type d'));
+  assert.ok(!denied('find node_modules/@org -maxdepth 1 -type d'));
 });
 
 test("leaves non-search commands alone, including ones with absolute paths", () => {

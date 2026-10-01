@@ -167,7 +167,7 @@ export function withBaseLock<T>(key: string, critical: () => Promise<T>): Promis
  * the queue widths are.
  *
  * The gate is the one step in the pipeline that is genuinely expensive in machine
- * resources rather than in model latency: on `adRise/www` it runs a scoped
+ * resources rather than in model latency: on a large monorepo it runs a scoped
  * `lerna run build` plus `tsc --noEmit`, and a single `tsc` on that repo was
  * measured at 1.1 GB RSS (a full jest run, 961% CPU across 12 workers). Agent
  * runs, by contrast, sit at ~0% CPU waiting on the model — which is exactly why
@@ -194,8 +194,8 @@ export function withGateLock<T>(key: string, gate: () => Promise<T>): Promise<T>
  *
  * The symlink fast path is cheap and stays outside this lock (still up to
  * `REPO_CONCURRENCY` at once). But when the lockfile has diverged, `shareDeps`
- * clones the base `node_modules` (hundreds of thousands of inodes on
- * `adRise/www` — minutes just for the clonefile step, observed directly, not
+ * clones the base `node_modules` (hundreds of thousands of inodes on a
+ * large monorepo — minutes just for the clonefile step, observed directly, not
  * "near-instant" as the small-repo case assumes) and then runs a full `yarn
  * install`. Several of those at once on the SAME source tree don't parallelize
  * — they thrash each other on disk I/O and each one slows down, so three

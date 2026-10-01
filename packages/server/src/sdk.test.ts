@@ -3,17 +3,17 @@ import assert from "node:assert/strict";
 
 import { isMaxTurnsError, RunTrace, transcriptPath } from "./sdk.js";
 
-const CWD = "/Users/leo/dev/tubi/ai_workspaces/babysit-agent/.data/cache/worktrees/adRise__www/596";
+const CWD = "/Users/dev/ai_workspaces/babysit-agent/.data/cache/worktrees/org__web/596";
 
 test("transcriptPath reproduces the SDK's real on-disk slug", () => {
   process.env.CLAUDE_CONFIG_DIR = "/home/.claude";
   // Verbatim from the directory the SDK actually wrote for the max-turns Verdict
   // on thread 596: every non-alphanumeric char becomes `-`, so `/.data` doubles
-  // up and `adRise__www` becomes `adRise--www`. Getting this wrong makes the
+  // up and `org__web` becomes `org--web`. Getting this wrong makes the
   // logged path a dead link, which is the whole point of logging it.
   assert.equal(
     transcriptPath(CWD, "7f54cc19-821c-416a-91c5-974ca0191132"),
-    "/home/.claude/projects/-Users-leo-dev-tubi-ai-workspaces-babysit-agent--data-cache-worktrees-adRise--www-596/7f54cc19-821c-416a-91c5-974ca0191132.jsonl"
+    "/home/.claude/projects/-Users-dev-ai-workspaces-babysit-agent--data-cache-worktrees-org--web-596/7f54cc19-821c-416a-91c5-974ca0191132.jsonl"
   );
   delete process.env.CLAUDE_CONFIG_DIR;
 });
