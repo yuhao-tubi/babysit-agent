@@ -4,6 +4,7 @@
  *   tsx src/cli.ts poll-once   — run one poll cycle, upsert threads, print summary
  *   tsx src/cli.ts threads     — dump threads table
  *   tsx src/cli.ts verdict <id> — run the verdict engine on one thread (no actions)
+ *   tsx src/cli.ts bedrock-profiles — print the TVM's current model profile ARNs
  */
 import "./env.js"; // load .env before anything reads process.env
 import { listAuthoredPrs } from "./gh.js";
@@ -18,6 +19,7 @@ import { generateBlindSpots } from "./risks.js";
 import { generateExplanation } from "./explain.js";
 import { processThread } from "./processor.js";
 import { getEvents } from "./db.js";
+import { getBedrockSession } from "./bedrock-auth.js";
 
 async function main() {
   const cmd = process.argv[2];
@@ -157,8 +159,21 @@ async function main() {
       console.log(r.detail.slice(0, 800));
       break;
     }
+    case "bedrock-profiles": {
+      // Mints a fresh token from the TVM (keysmith) and prints every model
+      // profile ARN it currently vends. Use this to check whether a model ARN
+      // seen in an error (e.g. "400 the provided model identifier is invalid")
+      // is still current — the TVM mints fresh each call, so this always
+      // reflects live state, not a stale in-process cache.
+      const s = await getBedrockSession();
+      console.log(`region: ${s.region}`);
+      console.log(`default modelArn: ${s.modelArn}`);
+      console.log("available:");
+      for (const [name, arn] of Object.entries(s.models)) console.log(`  ${name} -> ${arn}`);
+      break;
+    }
     default:
-      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|blindspots <prKey>|explain <threadId> [question]|process <id>|retry-errors|gate <owner/repo>>");
+      console.error("usage: cli.ts <list-prs|poll-once|threads|verdict <id>|overview <prKey>|analyze-risks <prKey>|blindspots <prKey>|explain <threadId> [question]|process <id>|retry-errors|gate <owner/repo>|bedrock-profiles>");
       process.exit(1);
   }
 }
