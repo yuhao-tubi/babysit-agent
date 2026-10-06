@@ -307,6 +307,47 @@ export async function addWorktree(
   return { dir: wt, remoteSha };
 }
 
+/** Stock macOS interpreter: always present with the CLT git needs, and has `ctypes`. */
+const CLONE_PYTHON = "/usr/bin/python3";
+const CLONE_PY = [
+  "import ctypes, os, sys",
+  "libc = ctypes.CDLL('libc.dylib', use_errno=True)",
+  "if libc.clonefile(os.fsencode(sys.argv[1]), os.fsencode(sys.argv[2]), 0) != 0:",
+  "    sys.exit('clonefile: ' + os.strerror(ctypes.get_errno()))",
+].join("\n");
+
+/**
+ * Copy-on-write clone `src` → `dst` (a file or a whole tree), preferring ONE
+ * `clonefile(2)` call over `cp -cR`.
+ *
+ * `cp -cR` clones file by file: a 234k-file `node_modules` is 234k round trips
+ * through the kernel (and through whatever endpoint monitor watches file
+ * creation), which took 18+ minutes on a loaded laptop. `clonefile` on a
+ * directory has APFS build the whole tree's metadata in one call (8s for the same
+ * tree, same load) with the same semantics: a private copy sharing data blocks
+ * until either side writes, so a top-up install in `dst` can't touch `src`.
+ *
+ * Node has no binding for it, hence the tiny python3 `ctypes` call. Any failure
+ * (no python, not APFS, different volume) falls back to `cp -cR`. A failed clone
+ * may leave a partial `dst`, which is removed first — `cp -cR src dst` onto an
+ * existing `dst` would nest `src` inside it instead of replacing it.
+ */
+export async function cloneTree(
+  src: string,
+  dst: string,
+  python = CLONE_PYTHON
+): Promise<"clonefile" | "cp"> {
+  const preexisting = existsSync(dst);
+  try {
+    await exec(python, ["-c", CLONE_PY, src, dst], { timeout: 10 * 60 * 1000 });
+    return "clonefile";
+  } catch {
+    if (!preexisting) rmSync(dst, { recursive: true, force: true });
+    await exec("cp", ["-cR", src, dst], { maxBuffer: 64 * 1024 * 1024 });
+    return "cp";
+  }
+}
+
 /**
  * Seed the base clone's already-compiled, gitignored build outputs into the
  * worktree so the gate doesn't have to rebuild them. A monorepo's internal
@@ -325,7 +366,7 @@ async function seedBuildArtifacts(base: string, wt: string): Promise<void> {
     const dst = join(wt, rel);
     if (!existsSync(src) || existsSync(dst)) return;
     try {
-      await exec("cp", ["-cR", src, dst], { maxBuffer: 64 * 1024 * 1024 });
+      await cloneTree(src, dst);
     } catch {
       /* best-effort — the gate rebuilds if the artifact is missing */
     }
@@ -454,10 +495,20 @@ function workspacePackageDirs(wt: string): Map<string, string> {
  *
  * `copy` — a genuinely new EXTERNAL dep (must be fetched), or anything we can't
  * prove, so the caller keeps the safe copy+install path.
+ *
+ * `inherited` — the deps the PR's own merge-base with master already declared (see
+ * `declaredDepsAtMergeBase`). A dep missing from base that the PR did NOT add is
+ * not a new dependency: master dropped it after the PR branched (a stale stack
+ * layer still declares a package master has since removed), so base's install
+ * never had it. Counting it as "new" sent every such Thread down the full
+ * 234k-file copy + `yarn install` for a package the PR's change never touches. A
+ * dep the PR itself added is absent from `inherited` and still forces the copy.
+ * `null` (merge-base unknown) keeps the strict behaviour.
  */
 export function lightDepsPlan(
   base: string,
-  wt: string
+  wt: string,
+  inherited: ReadonlySet<string> | null = null
 ): { kind: "base" } | { kind: "base+workspace"; overrides: Map<string, string> } | { kind: "copy" } {
   const deps = declaredDeps(wt);
   if (!deps) return { kind: "copy" }; // can't prove safe
@@ -469,10 +520,32 @@ export function lightDepsPlan(
   const overrides = new Map<string, string>();
   for (const name of missing) {
     const dir = workspaces.get(name);
-    if (!dir) return { kind: "copy" }; // a real external addition → must install
-    overrides.set(name, dir);
+    if (dir) {
+      overrides.set(name, dir);
+      continue;
+    }
+    if (inherited?.has(name)) continue; // not the PR's addition — master dropped it
+    return { kind: "copy" }; // a real external addition → must install
   }
-  return { kind: "base+workspace", overrides };
+  return overrides.size ? { kind: "base+workspace", overrides } : { kind: "base" };
+}
+
+/**
+ * Dependency names the PR's merge-base with master declared in `package.json` —
+ * i.e. what the PR inherited rather than added. `null` when it can't be read
+ * (no merge-base, no manifest, bad JSON): the caller then stays strict.
+ */
+export async function declaredDepsAtMergeBase(
+  wt: string,
+  baseRef = `origin/${BASE_BRANCH}`
+): Promise<Set<string> | null> {
+  try {
+    const mergeBase = await git(wt, ["merge-base", "HEAD", baseRef]);
+    const pkg = JSON.parse(await git(wt, ["show", `${mergeBase}:package.json`]));
+    return new Set(Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -556,7 +629,7 @@ async function shareDeps(
   // workspace packages shadowing base for names base lacks. Only a genuinely new
   // EXTERNAL dep — one that has to be fetched — falls through to the copy below.
   if (opts.light) {
-    const plan = lightDepsPlan(base, wt);
+    const plan = lightDepsPlan(base, wt, await declaredDepsAtMergeBase(wt));
     if (plan.kind === "base") {
       symlinkSync(baseNm, join(wt, "node_modules"), "dir");
       return;
@@ -568,9 +641,9 @@ async function shareDeps(
   }
 
   // Divergent (or unknown) lockfile → private copy so a top-up install stays
-  // local to this worktree. cp -c uses APFS copy-on-write, but that is only
-  // "near-instant" on a small tree: it pays a clonefile syscall PER FILE, and
-  // a large monorepo's node_modules can be ~234k files, so this step alone is minutes.
+  // local to this worktree. `cp -cR` is APFS copy-on-write too, but pays a
+  // clonefile syscall PER FILE: a large monorepo's node_modules is ~234k files, so
+  // it took 18+ minutes under load. `cloneTree` clones the whole tree in one call.
   //
   // Per-package symlinks instead of a file-level clone is NOT a valid
   // shortcut, even though it is ~1000x faster to set up: a package with a
@@ -586,9 +659,9 @@ async function shareDeps(
   // concurrent Threads could all still be running 40+ minutes later with
   // nothing finished.
   await withDepsLock(opts.repoKey ?? base, async () => {
-    await exec("cp", ["-cR", baseNm, join(wt, "node_modules")], {
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    const t0 = Date.now();
+    const how = await cloneTree(baseNm, join(wt, "node_modules"));
+    console.log(`[deps] node_modules via ${how} in ${((Date.now() - t0) / 1000).toFixed(1)}s → ${wt}`);
     const hasYarn = existsSync(join(wt, "yarn.lock"));
     if (hasYarn) {
       await exec("yarn", ["install", "--non-interactive"], {

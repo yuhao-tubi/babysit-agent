@@ -170,6 +170,135 @@ test("a missing dep that is NOT a workspace member → copy even with workspaces
   assert.equal(lightDepsPlan(base, wt).kind, "copy");
 });
 
+// ---- inherited deps: a stale PR must not look like it ADDED what master dropped ----
+
+test("a missing dep the PR inherited (master dropped it since) → base symlink, no copy", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  // The PR branch predates master removing `preact-render-to-string`, so it still
+  // declares it while base's install (built from current master) lacks it.
+  writeRootPkg(wt, { react: "^18", "preact-render-to-string": "^6" });
+  assert.equal(lightDepsPlan(base, wt, new Set(["react", "preact-render-to-string"])).kind, "base");
+});
+
+test("a missing dep the PR itself ADDED still forces the copy, even beside inherited ones", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  writeRootPkg(wt, { react: "^18", "dropped-by-master": "^1", "brand-new-lib": "^1" });
+  assert.equal(lightDepsPlan(base, wt, new Set(["react", "dropped-by-master"])).kind, "copy");
+});
+
+test("an inherited-but-missing workspace member is still overridden, not skipped", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  writeRootPkg(wt, { react: "^18", "@myorg/hls": "*" }, ["packages/*"]);
+  writeWorkspacePkg(wt, "packages/hls.js", "@myorg/hls");
+  const plan = lightDepsPlan(base, wt, new Set(["react", "@myorg/hls"]));
+  assert.equal(plan.kind, "base+workspace");
+});
+
+test("unknown merge-base (null) → strict: a missing dep forces the copy", () => {
+  const base = scratch();
+  const wt = scratch();
+  installInBase(base, ["react"]);
+  writeRootPkg(wt, { react: "^18", "preact-render-to-string": "^6" });
+  assert.equal(lightDepsPlan(base, wt, null).kind, "copy");
+});
+
+const { declaredDepsAtMergeBase } = await import("./worktrees.js");
+
+test("declaredDepsAtMergeBase reads the manifest the PR branched from, not master's tip", async () => {
+  const dir = scratch();
+  const run = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  const commitPkg = (deps: Record<string, string>) => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: deps }));
+    run(["add", "-A"]);
+    run(["commit", "-qm", "pkg"]);
+  };
+  run(["init", "-q", "--initial-branch=master"]);
+  run(["config", "user.email", "t@t"]);
+  run(["config", "user.name", "t"]);
+  commitPkg({ react: "1", preact: "1" });
+  run(["checkout", "-q", "-b", "pr"]);
+  commitPkg({ react: "1", preact: "1", "pr-added": "1" });
+  run(["checkout", "-q", "master"]);
+  commitPkg({ react: "1" }); // master dropped preact after the PR branched
+  run(["checkout", "-q", "pr"]);
+
+  const inherited = await declaredDepsAtMergeBase(dir, "master");
+  assert.deepEqual([...(inherited ?? [])].sort(), ["preact", "react"]);
+});
+
+test("declaredDepsAtMergeBase → null when the base ref doesn't resolve", async () => {
+  const r = repo("x;\n");
+  assert.equal(await declaredDepsAtMergeBase(r.dir, "origin/nope"), null);
+});
+
+// ---- cloneTree: one-call COW clone of node_modules, with a safe fallback ----
+
+const { cloneTree } = await import("./worktrees.js");
+const { statSync, lstatSync, readlinkSync, symlinkSync, chmodSync, existsSync, readdirSync } =
+  await import("node:fs");
+
+/** A small node_modules lookalike: nested file, executable, relative symlink. */
+function fakeNodeModules(): string {
+  const src = join(scratch(), "node_modules");
+  mkdirSync(join(src, "pkg", "lib"), { recursive: true });
+  mkdirSync(join(src, ".bin"), { recursive: true });
+  writeFileSync(join(src, "pkg", "lib", "index.js"), "module.exports = 1;\n");
+  writeFileSync(join(src, "pkg", "cli.js"), "#!/usr/bin/env node\n");
+  chmodSync(join(src, "pkg", "cli.js"), 0o755);
+  symlinkSync("../pkg/cli.js", join(src, ".bin", "pkg"));
+  return src;
+}
+
+test("cloneTree reproduces files, modes and symlinks", async () => {
+  const src = fakeNodeModules();
+  const dst = join(scratch(), "node_modules");
+  const how = await cloneTree(src, dst);
+  // APFS → real clonefile; elsewhere (CI on Linux) the cp fallback must still be exact.
+  if (process.platform === "darwin") assert.equal(how, "clonefile");
+  assert.equal(readFileSync(join(dst, "pkg", "lib", "index.js"), "utf8"), "module.exports = 1;\n");
+  assert.equal(statSync(join(dst, "pkg", "cli.js")).mode & 0o777, 0o755);
+  assert.ok(lstatSync(join(dst, ".bin", "pkg")).isSymbolicLink());
+  assert.equal(readlinkSync(join(dst, ".bin", "pkg")), "../pkg/cli.js");
+});
+
+test("cloneTree is private: writing the clone never changes the source", async () => {
+  const src = fakeNodeModules();
+  const dst = join(scratch(), "node_modules");
+  await cloneTree(src, dst);
+  writeFileSync(join(dst, "pkg", "lib", "index.js"), "changed\n");
+  writeFileSync(join(dst, "pkg", "added.js"), "new\n");
+  assert.equal(readFileSync(join(src, "pkg", "lib", "index.js"), "utf8"), "module.exports = 1;\n");
+  assert.equal(existsSync(join(src, "pkg", "added.js")), false);
+});
+
+test("cloneTree falls back to cp when the clone helper is unavailable, without nesting", async () => {
+  const src = fakeNodeModules();
+  const dst = join(scratch(), "node_modules");
+  assert.equal(await cloneTree(src, dst, "/nonexistent/python3"), "cp");
+  assert.equal(readFileSync(join(dst, "pkg", "lib", "index.js"), "utf8"), "module.exports = 1;\n");
+  // `cp -cR src dst` onto an existing dst would put a second node_modules inside.
+  assert.equal(existsSync(join(dst, "node_modules")), false);
+  assert.deepEqual(readdirSync(dst).sort(), [".bin", "pkg"]);
+});
+
+test("cloneTree removes a partial dst before the fallback so cp can't nest into it", async () => {
+  const src = fakeNodeModules();
+  const dst = join(scratch(), "node_modules");
+  // A failed clone helper that already created dst (the partial-clone case).
+  const helper = join(scratch(), "partial.sh");
+  writeFileSync(helper, `#!/bin/sh\nmkdir -p "$4"\nexit 1\n`);
+  chmodSync(helper, 0o755);
+  assert.equal(await cloneTree(src, dst, helper), "cp");
+  assert.equal(existsSync(join(dst, "node_modules")), false);
+  assert.deepEqual(readdirSync(dst).sort(), [".bin", "pkg"]);
+});
+
 // ---- applyPatchRebasing: landing a frozen proposal on a moved tree ----
 
 const { applyPatchRebasing } = await import("./worktrees.js");
